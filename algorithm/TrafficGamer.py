@@ -416,12 +416,14 @@ class TrafficGamer(Constrainted_CCE_MAPPO):
             old_log_probs = old_policy.log_prob(actions)
             
             # Initialize magnet_signal (used for logging even when magnet is disabled)
-            magnet_signal = torch.zeros(len(actions))
+            magnet_signal = torch.zeros(len(actions), dtype=torch.float32)
             
             if self.magnet:
                 # Use .sum() on log_prob to convert multi-dim tensor to scalar per action
+                # Use float32 to match model weights dtype
                 magnet_signal = torch.tensor(
-                    [magnet[i].log_prob(actions[i]).sum() for i in range(len(actions))]
+                    [magnet[i].log_prob(actions[i]).sum().item() for i in range(len(actions))],
+                    dtype=torch.float32
                 )
                 rewards = rewards + self.eta_coef1 * magnet_signal[:, None].to(self.device)
             
