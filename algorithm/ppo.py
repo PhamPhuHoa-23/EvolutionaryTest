@@ -41,38 +41,90 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+class ResidualBlock(nn.Module):
+    """Residual block for deeper networks."""
+    def __init__(self, dim):
+        super(ResidualBlock, self).__init__()
+        self.fc = nn.Sequential(
+            layer_init(nn.Linear(dim, dim)),
+            nn.LayerNorm(dim),
+            nn.ReLU(inplace=True),
+            layer_init(nn.Linear(dim, dim)),
+            nn.LayerNorm(dim),
+        )
+        
+    def forward(self, x):
+        return F.relu(x + self.fc(x))
+
+
 class Policy(nn.Module):
+    """Deeper Policy Network with residual connections.
+    
+    Architecture:
+    - Input layer: state_dim -> hidden_dim
+    - 2 Residual blocks for feature learning
+    - Output layer: hidden_dim -> 4 (mean + scale for Laplace)
+    """
     def __init__(self, state_dim, hidden_dim):
         super(Policy, self).__init__()
-        self.actor = nn.Sequential(
+        
+        # Input projection
+        self.input_layer = nn.Sequential(
             layer_init(nn.Linear(state_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
-            layer_init(nn.Linear(hidden_dim, 2 * 2), 0.01),
+        )
+        
+        # Residual blocks for deeper feature learning
+        self.res_block1 = ResidualBlock(hidden_dim)
+        self.res_block2 = ResidualBlock(hidden_dim)
+        
+        # Output head
+        self.output_layer = nn.Sequential(
+            layer_init(nn.Linear(hidden_dim, hidden_dim // 2)),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            layer_init(nn.Linear(hidden_dim // 2, 2 * 2), 0.01),  # mean(2) + scale(2)
         )
 
     def forward(self, state):
-        result = self.actor(state)
+        x = self.input_layer(state)
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+        result = self.output_layer(x)
+        
         mean = result[..., :2]
-
         b = result[..., 2:]
-        b = F.elu_(b, alpha=1.0) + 1.1
+        b = F.elu_(b, alpha=1.0) + 1.1  # Ensure positive scale for Laplace
         return mean, b
 
 
 class ValueNet(nn.Module):
+    """Deeper Value Network for centralized critic.
+    
+    Architecture:
+    - Input: concatenated observations from all agents
+    - 3-layer MLP with larger hidden dimensions
+    - Output: scalar value estimate
+    """
     def __init__(self, state_dim, hidden_dim, agent_number):
         super(ValueNet, self).__init__()
+        input_dim = state_dim * agent_number
 
         self.f = nn.Sequential(
-            layer_init(nn.Linear(state_dim * agent_number, hidden_dim)),
+            layer_init(nn.Linear(input_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
-            layer_init(nn.Linear(hidden_dim, 1), std=1.0),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            layer_init(nn.Linear(hidden_dim, hidden_dim // 2)),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            layer_init(nn.Linear(hidden_dim // 2, 1), std=1.0),
         )
 
     def forward(self, states):
-
         v = self.f(states)
         return v
     
