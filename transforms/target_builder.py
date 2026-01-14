@@ -44,3 +44,6 @@ class TargetBuilder(BaseTransform):
         data['agent']['target'][..., 3] = wrap_angle(data['agent']['heading'][:, self.num_historical_steps:] -
                                                      theta.unsqueeze(-1))
         return data
+
+    def forward(self, data: HeteroData) -> HeteroData:
+        return self(data)
