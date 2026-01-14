@@ -367,7 +367,7 @@ class TrafficGamer(Constrainted_CCE_MAPPO):
             self.sample(transition, agent_index)
         )
 
-        dones = torch.stack(dones, dim=0).view(-1, 1)
+        dones = torch.stack(dones, dim=0).view(-1, 1).type(torch.FloatTensor).to(self.device)
         states = (
             torch.stack(states, dim=0)
             .reshape(-1, self.agent_number * self.state_dim)
@@ -393,10 +393,10 @@ class TrafficGamer(Constrainted_CCE_MAPPO):
             .to(self.device)
         )
 
-        rewards = torch.stack(rewards, dim=0).to(self.device)
-        costs = torch.stack(costs, dim=0).to(self.device)
+        rewards = torch.stack(rewards, dim=0).type(torch.FloatTensor).to(self.device)
+        costs = torch.stack(costs, dim=0).type(torch.FloatTensor).to(self.device)
 
-        actions = torch.stack(actions, dim=0).to(self.device)
+        actions = torch.stack(actions, dim=0).type(torch.FloatTensor).to(self.device)
         
         for _ in range(self.epochs*5):
                 
