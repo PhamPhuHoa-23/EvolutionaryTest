@@ -84,6 +84,8 @@ class EvoQRE_Langevin(TrafficGamer):
         """
         Generate action via Langevin Sampling.
         state: (batch, state_dim) or (state_dim)
+        
+        Returns: tuple (action, log_prob) to match TrafficGamer interface
         """
         with torch.no_grad(): # Use torch.enable_grad() inside for Langevin
             if state.dim() == 1:
@@ -128,8 +130,13 @@ class EvoQRE_Langevin(TrafficGamer):
                 
                 actions = new_actions
                 actions.requires_grad = True
-                
-        return actions.squeeze(0).detach()
+        
+        # Return tuple (action, log_prob) to match TrafficGamer interface
+        # log_prob is a placeholder since Langevin doesn't compute explicit log_prob
+        action = actions.squeeze(0).detach()
+        log_prob = torch.zeros(1, device=self.device)  # Placeholder
+        
+        return action, log_prob
 
     def update(self, transition, agent_index):
         """
