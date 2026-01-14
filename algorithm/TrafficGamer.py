@@ -415,9 +415,13 @@ class TrafficGamer(Constrainted_CCE_MAPPO):
             old_policy = self.get_action_dist(observations)
             old_log_probs = old_policy.log_prob(actions)
             
-            if  self.magnet:
+            # Initialize magnet_signal (used for logging even when magnet is disabled)
+            magnet_signal = torch.zeros(len(actions))
+            
+            if self.magnet:
+                # Use .sum() on log_prob to convert multi-dim tensor to scalar per action
                 magnet_signal = torch.tensor(
-                    [magnet[i].log_prob(actions[i]) for i in range(len(actions))]
+                    [magnet[i].log_prob(actions[i]).sum() for i in range(len(actions))]
                 )
                 rewards = rewards + self.eta_coef1 * magnet_signal[:, None].to(self.device)
             
@@ -474,7 +478,11 @@ class TrafficGamer(Constrainted_CCE_MAPPO):
             
         for epoch in tqdm(range(self.epochs)):
             log = {}
-            log["magnet_signal"] = magnet_signal.mean().item()
+            # Only log magnet_signal if magnet is enabled
+            if self.magnet:
+                log["magnet_signal"] = magnet_signal.mean().item()
+            else:
+                log["magnet_signal"] = 0.0
             if self.method == 'QRDQN' or self.method=='SplineDQN' or self.method=='NCQR':
                     
                 distributional_cost_values_expected = self.cost_value_net_local(observations)
