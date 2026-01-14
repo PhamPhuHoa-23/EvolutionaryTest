@@ -153,11 +153,16 @@ class Constrainted_CCE_MAPPO(MAPPO):
             density_loss.backward()
             self.density_optimizer.step()
             
-        if  self.magnet:
-                magnet_signal = torch.tensor(
-                    [magnet[i].log_prob(actions[i]) for i in range(len(actions))]
-                )
-                rewards = rewards + self.eta_coef1 * magnet_signal[:, None].to(self.device)
+        # Initialize magnet_signal (used for logging even when magnet is disabled)
+        magnet_signal = torch.zeros(len(actions), dtype=torch.float32)
+        
+        if self.magnet:
+            # Use .sum().item() on log_prob to convert to scalar, dtype=float32 to match model
+            magnet_signal = torch.tensor(
+                [magnet[i].log_prob(actions[i]).sum().item() for i in range(len(actions))],
+                dtype=torch.float32
+            )
+            rewards = rewards + self.eta_coef1 * magnet_signal[:, None].to(self.device)
 
         with torch.no_grad():
             
@@ -203,7 +208,11 @@ class Constrainted_CCE_MAPPO(MAPPO):
         temp_pi_old = torch.ones_like(old_log_probs)    
         for epoch in tqdm(range(self.epochs)):
             log = {}
-            log["magnet_signal"] = magnet_signal.mean().item()
+            # Only log magnet_signal if magnet is enabled
+            if self.magnet:
+                log["magnet_signal"] = magnet_signal.mean().item()
+            else:
+                log["magnet_signal"] = 0.0
             
             # for target_param, local_param in zip(self.cost_value_net_target.parameters(), self.cost_value_net_local.parameters()):
             #         target_param.data.copy_(

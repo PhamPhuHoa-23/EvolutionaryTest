@@ -415,9 +415,21 @@ def extract_observations(state, agent_indices):
 
     Returns: torch.Tensor of shape (num_agents, obs_dim)
     obs = [x, y, vx, vy, yaw, speed, length]
+    
+    NOTE: Observations are NORMALIZED to prevent numerical instability:
+    - Position (x, y): relative to first controlled agent, scaled by 100
+    - Velocity (vx, vy): scaled by 30 (typical max speed)
+    - Yaw: already in [-pi, pi]
+    - Speed: scaled by 30
+    - Length: scaled by 10
     """
     observations = []
     timestep = int(np.array(state.timestep))
+    
+    # Get reference position (first agent) for relative coordinates
+    ref_idx = agent_indices[0]
+    ref_x = float(np.array(state.sim_trajectory.x[ref_idx, timestep]))
+    ref_y = float(np.array(state.sim_trajectory.y[ref_idx, timestep]))
 
     for idx in agent_indices:
         # Current position and velocity from sim_trajectory
@@ -431,7 +443,30 @@ def extract_observations(state, agent_indices):
         speed = np.sqrt(vx**2 + vy**2)
         length = 4.5  # Default vehicle length (meters)
 
-        obs = [x, y, vx, vy, yaw, speed, length]
+        # NORMALIZE observations to prevent NaN
+        # Position: relative to reference, scaled
+        x_norm = (x - ref_x) / 100.0
+        y_norm = (y - ref_y) / 100.0
+        # Velocity: scaled by typical max speed
+        vx_norm = vx / 30.0
+        vy_norm = vy / 30.0
+        # Yaw: already in reasonable range
+        yaw_norm = yaw / np.pi
+        # Speed: scaled
+        speed_norm = speed / 30.0
+        # Length: scaled
+        length_norm = length / 10.0
+        
+        # Clip to prevent extreme values
+        obs = [
+            np.clip(x_norm, -10, 10),
+            np.clip(y_norm, -10, 10),
+            np.clip(vx_norm, -2, 2),
+            np.clip(vy_norm, -2, 2),
+            np.clip(yaw_norm, -1, 1),
+            np.clip(speed_norm, 0, 2),
+            length_norm,
+        ]
         observations.append(obs)
 
     return torch.FloatTensor(observations).to(device)
@@ -825,7 +860,10 @@ for batch_idx in tqdm(range(num_batches), desc="Training Batches"):
             agent.update(transition_batch, i)
         except Exception as e:
             if batch_idx == 0:
+                import traceback
                 print(f"⚠️  Update error (agent {i}): {e}")
+                print("Full traceback:")
+                traceback.print_exc()
 
     # Record metrics for this batch
     avg_reward = np.mean(batch_rewards)

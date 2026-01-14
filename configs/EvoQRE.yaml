@@ -1,0 +1,27 @@
+hidden_dim: 128
+actor_learning_rate: 0.001
+critic_learning_rate: 0.001
+constrainted_critic_learning_rate: 0.001
+density_learning_rate: 0.001
+lamda: 0.95
+eps: 0.2
+gamma: 0.99
+offset: 5
+entropy_coef: 0.01 
+epochs: 10
+algorithm: "EvoQRE"
+gae: True
+target_kl: 0.01
+batch_size: 100
+episodes: 20
+beta_coef: 0.0
+type: "CVaR" # VaR or CVaR
+method: "SplineDQN" # QRDQN, IQN, SplineDQN, NCQR
+N_quantile: 32
+tau_update: 0.005 # smooth constant for soft update
+LR_QN: 0.001
+cost_quantile: 28 # For safety constraint
+is_magnet: False
+eta_coef1: 0.0
+eta_coef2: 0.0
+# New EvoQRE params if needed, mostly handled in code defaults

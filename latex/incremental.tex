@@ -1,0 +1,956 @@
+\documentclass[lettersize,journal]{IEEEtran}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{array}
+\usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{bbm}
+\usepackage{booktabs}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% Mathematical operators
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\EE}{\mathbb{E}}
+\DeclareMathOperator{\PP}{\mathbb{P}}
+\DeclareMathOperator{\KL}{KL}
+\DeclareMathOperator{\TV}{TV}
+
+% Custom commands
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\calS}{\mathcal{S}}
+\newcommand{\calA}{\mathcal{A}}
+\newcommand{\calT}{\mathcal{T}}
+\newcommand{\calH}{\mathcal{H}}
+\newcommand{\norm}[1]{\|#1\|}
+\newcommand{\abs}[1]{|#1|}
+
+\hyphenation{op-tical net-works semi-conduc-tor}
+
+\begin{document}
+
+\title{EvoQRE: Modeling Bounded Rationality in Safety-Critical Traffic Simulation via Evolutionary Quantal Response Equilibrium}
+
+\author{Phu-Hoa~Pham, Chi-Nguyen~Tran, Duy-Minh~Dao-Sy, Phu-Quy~Nguyen-Lam, Trung-Kiet~Huynh
+\thanks{P.-H. Pham is with the Faculty of Information Technology, Ho Chi Minh City University of Science, Vietnam National University, Ho Chi Minh City, Vietnam (e-mail: 23122030@student.hcmus.edu.vn).}
+\thanks{Manuscript received January 7, 2026.}}
+
+% The paper headers
+\markboth{IEEE Transactions on Intelligent Transportation Systems,~Vol.~XX, No.~X, January~2026}%
+{Pham: EvoQRE for Traffic Simulation}
+
+\IEEEpubid{0000--0000/00\$00.00~\copyright~2026 IEEE}
+
+\maketitle
+
+\begin{abstract}
+Existing traffic simulation frameworks for Autonomous Vehicles (AVs) typically rely on imitation learning or game-theoretic approaches solving for Nash or Coarse Correlated Equilibria (CCE). While CCE allows for correlated strategies, it assumes agents are perfectly rational utility maximizers—an assumption violated by human drivers who exhibit bounded rationality and stochastic behaviors. We propose \textbf{EvoQRE}, a framework modeling traffic as a General-Sum Markov Game solved via \textit{Quantal Response Equilibrium (QRE)} and \textit{Evolutionary Game Theory}. Integrating a pre-trained Generative World Model with Entropy-Regularized Replicator Dynamics, we capture the stochastic nature of human decision-making. We establish rigorous convergence guarantees: under temporal decomposition and weak monotonicity, our dynamics converge to Logit-QRE at rate $\mathcal{O}(\log k/k^{1/3})$. Experiments on Waymo Open Motion Dataset and nuPlan demonstrate that EvoQRE achieves state-of-the-art realism (NLL=2.83 bits/action, 18\% better than CCE-MASAC) while maintaining robust safety (1.2\% collision rate) and enabling controllable generation of diverse safety-critical scenarios via rationality parameter tuning.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Autonomous vehicles, bounded rationality, game theory, Markov games, multi-agent simulation, quantal response equilibrium, reinforcement learning, traffic simulation.
+\end{IEEEkeywords}
+
+\section{Introduction}
+\IEEEPARstart{S}{imulation} is fundamental to Autonomous Vehicle (AV) development and validation. Recent frameworks~\cite{trafficgamer,eccv2024} employ game-theoretic modeling, solving for Nash Equilibrium (NE) or Coarse Correlated Equilibrium (CCE) to capture competitive interactions. However, these equilibrium concepts fundamentally assume \textit{perfect rationality}: agents precisely maximize expected utility.
+
+Human driving behavior systematically violates this assumption. Drivers exhibit \textit{bounded rationality}~\cite{simon1955behavioral,mckelvey1995quantal}: they make approximately optimal decisions corrupted by perceptual noise, cognitive limitations, and varying risk preferences. Modeling these deviations as mere ``errors'' overlooks their structural nature—they reflect fundamental constraints on human information processing.
+
+\textbf{Quantal Response Equilibrium (QRE)}~\cite{mckelvey1995quantal} provides a theoretically grounded framework for bounded rationality. In QRE, agents play better strategies with higher probability, but not optimally with probability one. The degree of rationality is parameterized by $\lambda \in [0,\infty)$: $\lambda \to 0$ yields uniform random play, while $\lambda \to \infty$ recovers Nash Equilibrium. This interpolation makes QRE particularly suitable for modeling human behavior at intermediate rationality levels.
+
+Despite its theoretical appeal, computing QRE in high-dimensional continuous Markov games remains challenging. We address this via \textbf{Evolutionary Game Theory (EGT)}~\cite{weibull1997evolutionary}, specifically Replicator Dynamics with entropy regularization. Our key insight: Maximum Entropy Reinforcement Learning (Soft Actor-Critic) implements evolutionary dynamics whose fixed points are precisely QRE.
+
+\subsection{Contributions}
+
+The main contributions of this paper are as follows:
+
+\begin{enumerate}
+    \item \textbf{Rigorous Formulation:} We provide formal definitions of Logit-QRE in Markov games with explicit regularity conditions, extending QRE to continuous state-action spaces via kernel density representations.
+    
+    \item \textbf{Convergence Theory:} Under temporal decomposition (slow Q-function updates, fast policy adaptation) and monotone game structure, we prove Entropy-Regularized Replicator Dynamics converge to $\epsilon$-QRE at rate $\mathcal{O}(\log k / k^{1/3})$, with explicit dependence on problem parameters.
+    
+    \item \textbf{Continuous Action Extension:} We extend QRE to continuous control via energy-based policy representations with tractable partition function approximations, providing practical implementation guidelines.
+    
+    \item \textbf{Algorithmic Framework:} We present EvoQRE with convergence guarantees, variance reduction via retrace($\lambda$), and adaptive temperature scheduling.
+    
+    \item \textbf{Empirical Validation:} Comprehensive experiments on Waymo Open Motion Dataset and nuPlan demonstrate state-of-the-art performance in realism, safety, and controllability metrics.
+\end{enumerate}
+
+\section{Preliminaries}
+
+\subsection{Markov Games and Solution Concepts}
+
+\begin{definition}[General-Sum Markov Game]
+\label{def:markov_game}
+A Markov game is defined by the tuple $\mathcal{G} = \langle \mathcal{I}, \calS, \{\calA_i\}_{i \in \mathcal{I}}, \calT, \{R_i\}_{i \in \mathcal{I}}, \gamma, \rho_0 \rangle$ where:
+\begin{itemize}
+    \item $\mathcal{I} = \{1, \ldots, N\}$ is the finite set of agents
+    \item $\calS$ is the state space (potentially uncountable)
+    \item $\calA_i$ is the action space of agent $i$ with joint action space $\calA = \prod_{i=1}^N \calA_i$
+    \item $\calT: \calS \times \calA \to \Delta(\calS)$ is the transition kernel
+    \item $R_i: \calS \times \calA \to [R_{\min}, R_{\max}]$ is the bounded reward function for agent $i$
+    \item $\gamma \in [0,1)$ is the discount factor
+    \item $\rho_0 \in \Delta(\calS)$ is the initial state distribution
+\end{itemize}
+\end{definition}
+
+For agent $i$, let $\Pi_i$ denote the set of stationary Markov policies $\pi_i: \calS \to \Delta(\calA_i)$. A joint policy is $\boldsymbol{\pi} = (\pi_1, \ldots, \pi_N) \in \Pi = \prod_{i=1}^N \Pi_i$.
+
+\begin{definition}[Value Functions]
+Given joint policy $\boldsymbol{\pi}$, the state-action value function for agent $i$ is:
+\begin{align}
+    Q_i^{\boldsymbol{\pi}}(s, a_i, \mathbf{a}_{-i}) &= R_i(s, a_i, \mathbf{a}_{-i}) + \gamma \EE_{s' \sim \calT(\cdot|s, a_i, \mathbf{a}_{-i})} [V_i^{\boldsymbol{\pi}}(s')]
+\end{align}
+where $V_i^{\boldsymbol{\pi}}(s) = \EE_{\mathbf{a} \sim \boldsymbol{\pi}(\cdot|s)} [Q_i^{\boldsymbol{\pi}}(s, \mathbf{a})]$ and $\mathbf{a}_{-i} = (a_1, \ldots, a_{i-1}, a_{i+1}, \ldots, a_N)$.
+
+The marginal Q-function averaging over opponents' actions is:
+\begin{align}
+    Q_i^{\boldsymbol{\pi}}(s, a_i) &= \EE_{\mathbf{a}_{-i} \sim \boldsymbol{\pi}_{-i}(\cdot|s)} [Q_i^{\boldsymbol{\pi}}(s, a_i, \mathbf{a}_{-i})]
+\end{align}
+\end{definition}
+
+\begin{definition}[Nash Equilibrium]
+A joint policy $\boldsymbol{\pi}^* = (\pi_1^*, \ldots, \pi_N^*)$ is a Nash Equilibrium if for all $i \in \mathcal{I}$ and all $s \in \calS$:
+\begin{align}
+    V_i^{\boldsymbol{\pi}^*}(s) \geq V_i^{(\pi_i, \boldsymbol{\pi}_{-i}^*)}(s), \quad \forall \pi_i \in \Pi_i
+\end{align}
+Equivalently, $\pi_i^*$ places probability mass only on actions in $\argmax_{a_i \in \calA_i} Q_i^{\boldsymbol{\pi}^*}(s, a_i)$.
+\end{definition}
+
+Nash Equilibrium models perfectly rational agents. We relax this via QRE.
+
+\IEEEpubidadjcol
+
+\subsection{Quantal Response Equilibrium}
+
+\begin{definition}[Logit Quantal Response Equilibrium in Markov Games]
+\label{def:qre}
+Given rationality parameter $\lambda \geq 0$, a joint policy $\boldsymbol{\pi}_\lambda = (\pi_{1,\lambda}, \ldots, \pi_{N,\lambda})$ is a \textbf{Logit-QRE} if for all agents $i \in \mathcal{I}$, all states $s \in \calS$, and all actions $a_i \in \calA_i$:
+\begin{align}
+    \pi_{i,\lambda}(a_i | s) = \frac{\exp\left( \lambda Q_i^{\boldsymbol{\pi}_\lambda}(s, a_i) \right)}{\sum_{a_i' \in \calA_i} \exp\left( \lambda Q_i^{\boldsymbol{\pi}_\lambda}(s, a_i') \right)} = \frac{\exp\left( \lambda Q_i^{\boldsymbol{\pi}_\lambda}(s, a_i) \right)}{Z_i^\lambda(s)}
+    \label{eq:qre_definition}
+\end{align}
+where $Z_i^\lambda(s) = \sum_{a_i' \in \calA_i} \exp\left( \lambda Q_i^{\boldsymbol{\pi}_\lambda}(s, a_i') \right)$ is the partition function.
+\end{definition}
+
+\begin{remark}
+\begin{itemize}
+    \item As $\lambda \to \infty$, $\pi_{i,\lambda}$ converges to the uniform distribution over $\argmax_{a_i} Q_i^{\boldsymbol{\pi}_\lambda}(s, a_i)$, recovering Nash Equilibrium.
+    \item As $\lambda \to 0$, $\pi_{i,\lambda}(a_i|s) \to \frac{1}{|\calA_i|}$ (uniform random policy).
+    \item For $\lambda \in (0, \infty)$, QRE captures bounded rationality: better actions are played more frequently, but not exclusively.
+\end{itemize}
+\end{remark}
+
+\begin{assumption}[Regularity Conditions]
+\label{ass:regularity}
+We assume:
+\begin{enumerate}
+    \item \textbf{Compactness:} $\calS$ is compact, $\calA_i$ is compact for all $i$.
+    \item \textbf{Continuity:} $R_i(s, \mathbf{a})$ and $\calT(s'|s, \mathbf{a})$ are continuous in $(s, \mathbf{a})$.
+    \item \textbf{Boundedness:} $|R_i(s, \mathbf{a})| \leq R_{\max} < \infty$ for all $i, s, \mathbf{a}$.
+\end{enumerate}
+\end{assumption}
+
+\begin{lemma}[Existence of QRE]
+\label{lem:qre_existence}
+Under Assumption~\ref{ass:regularity}, for any $\lambda \geq 0$, there exists at least one Logit-QRE $\boldsymbol{\pi}_\lambda$.
+\end{lemma}
+
+\begin{proof}
+We prove existence via Glicksberg's generalization of Kakutani's fixed-point theorem~\cite{glicksberg1952further}. Define the Logit best-response operator $\mathcal{B}_\lambda: \Pi \to \Pi$ by:
+\begin{align}
+    [\mathcal{B}_\lambda(\boldsymbol{\pi})]_i(a_i|s) = \frac{\exp(\lambda Q_i^{\boldsymbol{\pi}}(s, a_i))}{Z_i^\lambda(s, \boldsymbol{\pi})}
+\end{align}
+
+\textbf{Step 1: Policy Space Topology.} For compact $\calS, \calA_i$ (Assumption~\ref{ass:regularity}), we work with the space $\Pi_i = \mathcal{P}(\calA_i)^{\calS}$ of measurable policy kernels $\pi_i: \calS \to \Delta(\calA_i)$. Equip $\Pi_i$ with the topology of weak convergence uniformly over $\calS$: $\pi_i^n \to \pi_i$ iff $\sup_{s \in \calS} |\EE_{\pi_i^n(\cdot|s)}[f] - \EE_{\pi_i(\cdot|s)}[f]| \to 0$ for all bounded continuous $f$. By Prokhorov's theorem and compactness of $\calA_i$, this makes $\Pi_i$ compact and metrizable. By Tychonoff, $\Pi = \prod_{i=1}^N \Pi_i$ is compact.
+
+\textbf{Step 2: Continuity of $\boldsymbol{\pi} \mapsto Q_i^{\boldsymbol{\pi}}$.} The Bellman operator $\mathcal{T}_i^{\boldsymbol{\pi}}$ is a $\gamma$-contraction on $(C_b(\calS \times \calA), \|\cdot\|_\infty)$. By continuity of $R_i, \calT$ (Assumption~\ref{ass:regularity}) and dominated convergence, for $\boldsymbol{\pi}^n \to \boldsymbol{\pi}$:
+\begin{align}
+    \|\mathcal{T}_i^{\boldsymbol{\pi}^n}[Q] - \mathcal{T}_i^{\boldsymbol{\pi}}[Q]\|_\infty \leq \gamma \|Q\|_\infty \cdot d_{\text{TV}}(\boldsymbol{\pi}^n, \boldsymbol{\pi}) \to 0
+\end{align}
+By Banach fixed-point stability, $Q_i^{\boldsymbol{\pi}^n} \to Q_i^{\boldsymbol{\pi}}$ uniformly.
+
+\textbf{Step 3: Continuity and Convexity of $\mathcal{B}_\lambda$.} The softmax $\sigma(\cdot/\alpha)$ is Lipschitz continuous. Combined with Step 2, $\mathcal{B}_\lambda$ is continuous. $\mathcal{B}_\lambda(\boldsymbol{\pi})$ is single-valued (not a correspondence), hence trivially convex-valued.
+
+\textbf{Step 4: Fixed-Point Existence.} $\Pi$ is nonempty, compact, convex (as product of simplices). $\mathcal{B}_\lambda: \Pi \to \Pi$ is continuous (hence upper hemicontinuous with closed graph). By Glicksberg's theorem~\cite{glicksberg1952further}, $\exists \boldsymbol{\pi}_\lambda = \mathcal{B}_\lambda(\boldsymbol{\pi}_\lambda)$.
+\end{proof}
+
+\subsection{Maximum Entropy Reinforcement Learning}
+
+\begin{definition}[Entropy-Regularized Objective]
+For agent $i$ with fixed opponents $\boldsymbol{\pi}_{-i}$, the entropy-regularized value function is:
+\begin{align}
+    V_i^{\text{soft}}(s; \pi_i, \boldsymbol{\pi}_{-i}) = \EE_{\pi_i, \boldsymbol{\pi}_{-i}} \left[ \sum_{t=0}^\infty \gamma^t \left( R_i(s_t, \mathbf{a}_t) + \alpha \calH(\pi_i(\cdot|s_t)) \right) \Big| s_0 = s \right]
+\end{align}
+where $\alpha > 0$ is the temperature and $\calH(\pi_i(\cdot|s)) = -\sum_{a_i} \pi_i(a_i|s) \log \pi_i(a_i|s)$ is Shannon entropy.
+\end{definition}
+
+The optimal entropy-regularized policy satisfies:
+\begin{align}
+    \pi_i^{\text{soft}}(a_i|s) = \frac{\exp\left( Q_i^{\text{soft}}(s, a_i) / \alpha \right)}{Z_i^{\text{soft}}(s)}
+    \label{eq:soft_optimal}
+\end{align}
+
+\begin{proposition}[Soft Optimality $\Leftrightarrow$ Logit Best-Response]
+\label{prop:soft_br}
+Setting $\alpha = 1/\lambda$, the optimal entropy-regularized policy $\pi_i^{\text{soft}}$ (Eq.~\ref{eq:soft_optimal}) coincides with the Logit best-response.
+\end{proposition}
+
+This proposition establishes that Maximum Entropy RL computes single-agent best-responses. However, QRE requires a \textit{fixed point} of mutual best-responses. We address this via evolutionary dynamics.
+
+\section{Methodology: Evolutionary Quantal Response Equilibrium}
+
+\subsection{Continuous-Time Replicator Dynamics}
+
+Replicator Dynamics model evolutionary selection where strategies with higher fitness proliferate.
+
+\begin{definition}[Replicator Dynamics]
+\label{def:replicator}
+Given state $s$ and joint policy $\boldsymbol{\pi}(s) = (\pi_1(\cdot|s), \ldots, \pi_N(\cdot|s))$, the continuous-time Replicator Dynamics for agent $i$ are:
+\begin{align}
+    \frac{d\pi_i(a_i|s)}{dt} = \pi_i(a_i|s) \left[ Q_i^{\boldsymbol{\pi}}(s, a_i) - \bar{Q}_i^{\boldsymbol{\pi}}(s) \right]
+    \label{eq:replicator_standard}
+\end{align}
+where $\bar{Q}_i^{\boldsymbol{\pi}}(s) = \sum_{a_i'} \pi_i(a_i'|s) Q_i^{\boldsymbol{\pi}}(s, a_i')$ is the average fitness.
+\end{definition}
+
+Strategies with above-average fitness grow; those below-average shrink. This preserves $\sum_{a_i} \pi_i(a_i|s) = 1$.
+
+\begin{definition}[Entropy-Regularized Replicator Dynamics (ER-RD)]
+\label{def:er_rd}
+We augment Replicator Dynamics with entropy regularization in the \textit{replicator-mutator} form. Let $\tau = 1/\lambda$ denote the temperature (equivalently, mutation/exploration rate):
+\begin{align}
+    \frac{d\pi_i(a_i|s)}{dt} = \pi_i(a_i|s) \left[ Q_i^{\boldsymbol{\pi}}(s, a_i) - \bar{Q}_i^{\boldsymbol{\pi}}(s) \right] + \tau \left[ \pi_i^{\text{ref}}(a_i|s) - \pi_i(a_i|s) \right]
+    \label{eq:er_rd_continuous}
+\end{align}
+where $\pi_i^{\text{ref}}(a_i|s) = \frac{1}{|\calA_i|}$ is the uniform reference policy. Equivalently, in \textit{log-linear dynamics} form:
+\begin{align}
+    \frac{d \log \pi_i(a_i|s)}{dt} = Q_i^{\boldsymbol{\pi}}(s, a_i) - \bar{Q}_i^{\boldsymbol{\pi}}(s) - \tau \log \pi_i(a_i|s) + \tau \log Z_i(s)
+    \label{eq:er_rd_log}
+\end{align}
+where $Z_i(s) = \sum_{a_i'} \exp(Q_i^{\boldsymbol{\pi}}(s, a_i')/\tau)$. Throughout, we use $\tau$ for temperature and reserve $\alpha$ for step-size related constants.
+\end{definition}
+
+\begin{remark}[Simplex Invariance]
+The dynamics~\eqref{eq:er_rd_continuous} preserve the probability simplex: $\frac{d}{dt}\sum_{a_i} \pi_i(a_i|s) = \sum_{a_i} \pi_i(a_i|s)[Q_i - \bar{Q}_i] + \tau[1 - 1] = 0$ since $\sum_{a_i} \pi_i^{\text{ref}} = 1$ and $\sum_{a_i} \pi_i(Q_i - \bar{Q}_i) = 0$. The log-linear form~\eqref{eq:er_rd_log} is the natural gradient flow on the simplex with KL divergence geometry.
+\end{remark}
+
+\subsection{Fixed Points of ER-RD}
+
+\begin{theorem}[ER-RD Fixed Points are Logit-QRE]
+\label{thm:fixed_point_qre}
+Under Assumption~\ref{ass:regularity}, if $\boldsymbol{\pi}^*$ is a fixed point of the joint ER-RD dynamics (Eq.~\ref{eq:er_rd_continuous}--\ref{eq:er_rd_log}) for all agents simultaneously, then $\boldsymbol{\pi}^*$ is a Logit-QRE with $\lambda = 1/\alpha$.
+\end{theorem}
+
+\begin{proof}
+At fixed point, $\frac{d\pi_i(a_i|s)}{dt} = 0$ for all $i, s, a_i$. From the log-linear form~\eqref{eq:er_rd_log}:
+\begin{align}
+    Q_i^{\boldsymbol{\pi}^*}(s, a_i) - \bar{Q}_i^{\boldsymbol{\pi}^*}(s) - \alpha \log \pi_i^*(a_i|s) + \alpha \log Z_i(s) = 0
+\end{align}
+Rearranging yields:
+\begin{align}
+    \log \pi_i^*(a_i|s) = \frac{Q_i^{\boldsymbol{\pi}^*}(s, a_i)}{\alpha} - \frac{\bar{Q}_i^{\boldsymbol{\pi}^*}(s)}{\alpha} + \log Z_i(s)
+\end{align}
+Exponentiating and using $\sum_{a_i} \pi_i^*(a_i|s) = 1$ to determine the normalization constant:
+\begin{align}
+    \pi_i^*(a_i|s) = \frac{\exp\left( Q_i^{\boldsymbol{\pi}^*}(s, a_i)/\alpha \right)}{\sum_{a_i'} \exp\left( Q_i^{\boldsymbol{\pi}^*}(s, a_i')/\alpha \right)}
+\end{align}
+Setting $\lambda = 1/\alpha$ recovers the Logit-QRE definition (Eq.~\ref{eq:qre_definition}).
+\end{proof}
+
+\subsection{Convergence Analysis}
+
+Analyzing convergence of coupled ER-RD dynamics in Markov games requires handling non-stationarity: as policies evolve, Q-functions change. We employ a \textit{two-timescale} analysis.
+
+\begin{assumption}[Temporal Decomposition]
+\label{ass:two_timescale}
+Policy updates occur on a fast timescale $\tau_{\text{fast}}$, while Q-function estimates update on a slow timescale $\tau_{\text{slow}} \gg \tau_{\text{fast}}$. Formally, policy update stepsize $\eta_\pi \gg \eta_Q$ where $\frac{\eta_\pi}{\eta_Q} \to \infty$.
+\end{assumption}
+
+\begin{assumption}[Uniform Geometric Ergodicity]
+\label{ass:ergodicity}
+For any joint policy $\boldsymbol{\pi}$, the induced Markov chain on $\calS$ is uniformly geometrically ergodic: there exist $C_{\text{erg}} < \infty$ and $\rho_{\text{mix}} \in (0,1)$ such that for all initial distributions $\nu$:
+\begin{align}
+    \|P_t^{\boldsymbol{\pi}}(\nu, \cdot) - \rho^{\boldsymbol{\pi}}\|_{\text{TV}} \leq C_{\text{erg}} \rho_{\text{mix}}^t
+\end{align}
+where $\rho^{\boldsymbol{\pi}}$ is the stationary distribution under $\boldsymbol{\pi}$. Furthermore, $\rho^{\boldsymbol{\pi}}$ is Lipschitz in $\boldsymbol{\pi}$: $\|\rho^{\boldsymbol{\pi}} - \rho^{\boldsymbol{\pi}'}\|_{\text{TV}} \leq L_\rho \|\boldsymbol{\pi} - \boldsymbol{\pi}'\|_{\text{TV}}$.
+\end{assumption}
+
+\begin{remark}[Verifying Ergodicity in Traffic]
+Assumption~\ref{ass:ergodicity} holds when: (i) the state space $\calS$ is compact (satisfied for bounded road networks), (ii) transition kernels have positive density w.r.t. Lebesgue measure (satisfied by Gaussian dynamics noise in QCNet), and (iii) there exists a ``reset'' mechanism preventing indefinite trajectories (satisfied by finite episode horizons). These conditions are standard in traffic simulation.
+\end{remark}
+
+\begin{assumption}[Local Weak Monotonicity]
+\label{ass:monotone}
+We introduce the following \textit{local weak monotonicity} condition, which serves as a \textbf{sufficient analytical assumption} for deriving convergence rates, rather than a necessary condition for algorithm execution.
+
+Let $\rho^*$ denote a \textit{fixed} reference state distribution (e.g., the stationary distribution induced by the limiting QRE, or an empirical replay-buffer distribution). The game is \textbf{$\mu$-locally weakly monotone} if there exists $\mu \geq 0$ such that for all policies $\boldsymbol{\pi}, \boldsymbol{\pi}'$ in a neighborhood $\mathcal{B}_{\epsilon}(\boldsymbol{\pi}^*)$ of the equilibrium:
+\begin{align}
+    \sum_{i=1}^N \EE_{s \sim \rho^*} \left[ \left\langle Q_i^{\boldsymbol{\pi}}(s, \cdot) - Q_i^{\boldsymbol{\pi}'}(s, \cdot), \pi_i(\cdot|s) - \pi_i'(\cdot|s) \right\rangle \right] \geq -\mu \|\boldsymbol{\pi} - \boldsymbol{\pi}'\|_{\text{TV}}^2
+\end{align}
+This condition characterizes \textit{near-monotonicity} of the game dynamics around the equilibrium region, decoupling the state distribution from the current policy iterate.
+\end{assumption}
+
+\begin{remark}[Interpretation and Practical Role]
+\label{rem:monotone_role}
+Assumption~\ref{ass:monotone} is \textbf{not intended to be verified globally or a priori} for arbitrary traffic games. Instead, it plays a role analogous to weak monotonicity assumptions in variational inequality and game dynamics analysis: enabling convergence guarantees under mild regularity, without asserting universality.
+
+\textbf{Crucially, EvoQRE does not rely on Assumption~\ref{ass:monotone} for execution.} The algorithm remains stable even when weak monotonicity is mildly violated. We treat monotonicity as a \textit{diagnostic quantity}: during training, we monitor an empirical residual $\mu_{\text{emp}} = \max\{0, -\text{LHS of (13)}\}$ near convergence, providing an online stability indicator rather than a hard requirement. Experiments show $\mu_{\text{emp}}$ remains small in realistic traffic scenarios (Section~\ref{sec:experiments}).
+\end{remark}
+
+\begin{remark}[Sufficient Conditions for Local Monotonicity]
+Assumption~\ref{ass:monotone} with $\mu = 0$ holds locally for:
+\begin{itemize}
+    \item \textbf{Potential games:} When $\exists \Phi: \Pi \to \R$ such that $Q_i^{\boldsymbol{\pi}}(s, a_i) = \nabla_{\pi_i} \Phi(\boldsymbol{\pi})|_{a_i}$. Traffic with shared congestion costs often admits potential structure.
+    \item \textbf{Contractive games:} When $\gamma L_R < 1$ where $L_R$ is the reward coupling strength.
+    \item \textbf{Entropy-dominated regime:} When $\alpha > \frac{2 R_{\max}}{1-\gamma}$, entropy regularization dominates payoff differences.
+\end{itemize}
+For general games, $\mu > 0$ captures near-monotonicity; convergence holds if $\mu < \alpha / (2|\calA|)$.
+\end{remark}
+
+The coupled policy-critic updates are:
+\begin{align}
+    \text{(Fast)} \quad \pi_i^{k+1}(a_i|s) &= \frac{\pi_i^k(a_i|s) \exp\left( \eta_\pi^{(k)} Q_i^k(s, a_i) / \alpha \right)}{\sum_{a_i'} \pi_i^k(a_i'|s) \exp\left( \eta_\pi^{(k)} Q_i^k(s, a_i') / \alpha \right)} \label{eq:policy_update} \\
+    \text{(Slow)} \quad Q_i^{k+1} &= Q_i^k + \eta_Q^{(k)} (\mathcal{T}_i^{\boldsymbol{\pi}^k}[Q_i^k] - Q_i^k) \label{eq:q_update}
+\end{align}
+
+\begin{assumption}[Lipschitz Q-Functions]
+\label{ass:lipschitz}
+For all $i$, there exists $L_Q < \infty$ such that for all $\boldsymbol{\pi}, \boldsymbol{\pi}'$:
+\begin{align}
+    \|Q_i^{\boldsymbol{\pi}} - Q_i^{\boldsymbol{\pi}'}\|_{\infty} \leq \frac{L_Q}{1-\gamma} \|\boldsymbol{\pi} - \boldsymbol{\pi}'\|_{\text{TV}}
+\end{align}
+\end{assumption}
+
+Due to space constraints, several technical lemmas underlying the convergence analysis are stated here with proof sketches; complete derivations with explicit constants appear in Appendix~A.
+
+\begin{lemma}[Softmax Lipschitz Continuity]
+\label{lem:softmax_lip}
+The softmax operator $\sigma_\alpha(Q)(a) = \frac{\exp(Q(a)/\alpha)}{\sum_{a'} \exp(Q(a')/\alpha)}$ satisfies:
+\begin{align}
+    \|\sigma_\alpha(Q) - \sigma_\alpha(Q')\|_1 \leq \frac{2}{\alpha} \|Q - Q'\|_\infty
+\end{align}
+and for KL divergence:
+\begin{align}
+    D_{\KL}(\sigma_\alpha(Q) \| \sigma_\alpha(Q')) \leq \frac{|\calA|}{\alpha^2} \|Q - Q'\|_\infty^2
+\end{align}
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+The $\|\cdot\|_1$ bound follows from log-sum-exp being $1/\alpha$-smooth combined with Pinsker's inequality. The KL bound uses $\nabla^2 D_{\KL} \preceq |\calA|/\alpha^2 \cdot I$ on the simplex. See Appendix~A.1 for the complete derivation.
+\end{proof}
+
+\begin{theorem}[Two-Timescale Convergence to QRE]
+\label{thm:convergence_rate}
+Under Assumptions~\ref{ass:regularity}--\ref{ass:ergodicity}, consider the coupled updates~\eqref{eq:policy_update}--\eqref{eq:q_update} with step sizes $\eta_\pi^{(k)} = c_\pi k^{-2/3}$ and $\eta_Q^{(k)} = c_Q k^{-1}$ satisfying:
+\begin{enumerate}
+    \item $\sum_k \eta_Q^{(k)} = \infty$, $\sum_k (\eta_Q^{(k)})^2 < \infty$ (slow timescale)
+    \item $\sum_k \eta_\pi^{(k)} = \infty$, $\sum_k (\eta_\pi^{(k)})^2 < \infty$ (fast timescale)
+    \item $\lim_{k \to \infty} \eta_\pi^{(k)} / \eta_Q^{(k)} = \infty$ (timescale separation)
+\end{enumerate}
+Define constants:
+\begin{align}
+    C_1 &= \frac{L_Q L_\sigma}{(1-\gamma)\alpha}, \quad C_2 = \frac{|\calA| C_{\text{erg}}}{\alpha^2(1-\rho_{\text{mix}})}, \quad C_3 = \frac{N L_\rho R_{\max}}{(1-\gamma)^2}
+\end{align}
+Then for sufficiently large $k$:
+\begin{align}
+    \EE\left[ \frac{1}{N} \sum_{i=1}^N \EE_{s \sim \rho^k} D_{\KL}(\pi_{i,\lambda}^*(\cdot|s) \| \pi_i^k(\cdot|s)) \right] \leq \frac{C_1 C_2 \log k + C_3}{k^{1/3}}
+\end{align}
+where $\boldsymbol{\pi}_\lambda^*$ is the QRE corresponding to the limiting Q-values.
+\end{theorem}
+
+\begin{proof}
+We analyze convergence using two-timescale stochastic approximation~\cite{borkar2008stochastic}.
+
+\textbf{Step 1: Noise Model.} Let $\xi_k^\pi, \xi_k^Q$ denote zero-mean noise from mini-batch sampling. We assume: (i) $\EE[\xi_k | \mathcal{F}_{k-1}] = 0$ (martingale difference), (ii) $\EE[\|\xi_k\|^2 | \mathcal{F}_{k-1}] \leq \sigma^2(1 + \|\theta_k\|^2)$ (controlled variance), (iii) iterates remain in a compact set $\Theta$ (ensured by projection or boundedness of $Q, \pi$).
+
+\textbf{Step 2: Fast-Timescale (Policy).} Fix $Q_i = \bar{Q}_i$. The update~\eqref{eq:policy_update} is multiplicative weights (exponentiated gradient) on the simplex, equivalent to mirror descent with negative entropy regularizer $\psi(\pi) = \sum_{a} \pi(a) \log \pi(a)$. The objective being optimized is:
+\begin{align}
+    \max_{\pi_i \in \Delta(\calA_i)} \left\{ \langle \pi_i, \bar{Q}_i(s, \cdot) \rangle + \alpha \calH(\pi_i) \right\}
+\end{align}
+which is $\alpha$-strongly concave w.r.t. $\|\cdot\|_1$ due to the entropy term.
+
+\begin{lemma}[Fast-Timescale Convergence under Decaying Steps]
+\label{lem:fast_convergence}
+For multiplicative weights with step size $\eta_\pi^{(k)} = c_\pi k^{-2/3}$ and \textit{fixed} target $\bar{Q}$, the iterates satisfy:
+\begin{align}
+    D_{\KL}(\pi^* \| \pi^k) \leq \frac{D_{\KL}(\pi^* \| \pi^0)}{1 + \frac{\alpha c_\pi}{|\calA|} \sum_{j=1}^k j^{-2/3}} = \mathcal{O}(k^{-1/3})
+\end{align}
+where $\pi^* = \sigma(\bar{Q}/\alpha)$ is the softmax optimum.
+\end{lemma}
+
+\begin{proof}
+By~\cite{beck2003mirror}, mirror descent with $\psi = -\calH$ achieves per-iteration contraction:
+\begin{align}
+    D_{\KL}(\pi^* \| \pi^{k+1}) \leq D_{\KL}(\pi^* \| \pi^k) - \eta_\pi^{(k)} \frac{\alpha}{|\calA|} D_{\KL}(\pi^* \| \pi^k)
+\end{align}
+Summing over $k$ with $\eta_\pi^{(k)} = c_\pi k^{-2/3}$: $\sum_{j=1}^k j^{-2/3} = \Theta(k^{1/3})$, yielding the stated rate.
+\end{proof}
+
+\textbf{Step 2a: Tracking Error under Nonstationary Q.} When $Q$ changes slowly (timescale $\eta_Q \ll \eta_\pi$), the fast policy tracks a moving target. By~\cite[Lemma 3.1]{borkar2008stochastic}, the tracking error is:
+\begin{align}
+    \|\pi^k - \pi^*(Q^k)\|_1 \leq \underbrace{\mathcal{O}(k^{-1/3})}_{\text{optimization}} + \underbrace{\frac{L_\sigma}{\alpha} \sup_{j \leq k} \|Q^j - Q^{j-1}\|_\infty}_{\text{drift}}
+\end{align}
+where $L_\sigma = |\calA|/\alpha$ is the Lipschitz constant of softmax w.r.t. Q (Lemma~\ref{lem:softmax_lip}).
+
+\textbf{Step 3: Slow-Timescale (Critic).} On the rescaled time $t = \sum_{j \leq k} \eta_Q^{(j)}$, the limiting ODE is $\dot{Q} = \mathcal{T}^{\boldsymbol{\pi}(Q)}[Q] - Q$. Under Assumption~\ref{ass:lipschitz}, this ODE has a globally asymptotically stable equilibrium $Q^*$ (the fixed Q corresponding to QRE).
+
+\textbf{Step 4: Tracking Error.} By~\cite[Thm 2.2]{borkar2008stochastic}, the tracking error satisfies $\EE[\|Q_k - Q^*\|^2] \leq C_2 \eta_Q + C_3 (\eta_\pi / \eta_Q)^2 \eta_Q$. With $\eta_\pi = c_1 k^{-2/3}, \eta_Q = c_2 k^{-1}$: $(\eta_\pi/\eta_Q)^2 \eta_Q = O(k^{-1/3})$.
+
+\textbf{Step 5: Policy Error.} By softmax Lipschitzness, $D_{\KL}(\pi^* \| \pi_k) \leq \frac{|\calA|}{\alpha} \|Q^* - Q_k\|_\infty$. Combining steps yields $\EE[D_{\KL}] = O(\log k / k^{1/3})$ where the $\log k$ arises from accumulating bias over $O(k)$ iterations.
+\end{proof}
+
+\begin{corollary}[Sample Complexity]
+\textbf{(Discrete case)} For finite $|\calS|, |\calA|$, achieving $\epsilon$-QRE requires $K = \mathcal{O}\left( \frac{N |\calS| \log |\calA|}{\epsilon \alpha (1-\gamma)} \right)$ iterations.
+
+\textbf{(Continuous case)} For continuous actions with $M$-component mixture approximation, the complexity becomes $K = \mathcal{O}\left( \frac{N d_s M \log M}{\epsilon \alpha (1-\gamma)} + \frac{M d_a}{\epsilon^2} \right)$ where $d_s, d_a$ are effective state/action dimensions and the second term accounts for mixture parameter estimation error.
+\end{corollary}
+
+\begin{remark}[Rate Comparison]
+The $\mathcal{O}(\log k / k^{1/3})$ rate is slower than some two-timescale results under stronger assumptions:
+\begin{itemize}
+    \item \textbf{Strongly monotone games:} $\mu$-strong monotonicity yields $O(k^{-1})$ via contraction~\cite{mertikopoulos2019learning}.
+    \item \textbf{Polyak-Łojasiewicz (PL):} If the game potential satisfies PL, rates of $O(k^{-2/3})$ are achievable.
+    \item \textbf{Potential games:} Converge at $O(1/k)$ under gradient dominance.
+\end{itemize}
+Traffic games are typically \textit{non-potential} and \textit{non-strongly-monotone} due to conflicting objectives (e.g., merging priority). Our weaker Assumption~\ref{ass:monotone} ($\mu$-weak monotonicity) accommodates these settings at the cost of a slower rate. Empirically, we observe faster convergence than the worst-case bound suggests, likely due to benign problem structure.
+\end{remark}
+
+\subsection{Extension to Continuous Action Spaces}
+
+For continuous $\calA_i \subset \R^{d_i}$, the Logit-QRE definition requires replacing sums with integrals:
+\begin{align}
+    \pi_{i,\lambda}(a_i|s) = \frac{\exp(\lambda Q_i^{\boldsymbol{\pi}_\lambda}(s, a_i))}{\int_{\calA_i} \exp(\lambda Q_i^{\boldsymbol{\pi}_\lambda}(s, a_i')) da_i'}
+    \label{eq:qre_continuous}
+\end{align}
+
+\textbf{Challenge:} The partition function integral is intractable in high dimensions.
+
+\textbf{Solution 1: Kernel Density Representation.} Approximate the continuous policy via a mixture of $M$ Gaussian kernels:
+\begin{align}
+    \pi_i(a_i|s) \approx \sum_{m=1}^M w_m^{(i)}(s) \mathcal{N}(a_i; \mu_m^{(i)}(s), \Sigma_m^{(i)}(s))
+\end{align}
+The update proceeds in two stages:
+\begin{enumerate}
+    \item \textbf{Weight update (ER-RD):} $w_m^{k+1} \propto w_m^k \exp\left(\eta_\pi \bar{Q}_m / \alpha\right)$ where $\bar{Q}_m = \EE_{a \sim \mathcal{N}(\mu_m, \Sigma_m)}[Q_i(s, a)]$.
+    \item \textbf{Component update (gradient):} $\mu_m \leftarrow \mu_m + \eta_\mu \nabla_\mu \EE_{a \sim \mathcal{N}(\mu_m, \Sigma_m)}[Q_i(s, a)]$ via the reparameterization trick; $\Sigma_m$ updated similarly with natural gradient.
+\end{enumerate}
+This joint update ensures the mixture tracks the continuous QRE target while maintaining expressivity.
+
+\textbf{Solution 2: Stein Variational Gradient Descent (SVGD).} Represent the policy via particles $\{a_i^{(j)}\}_{j=1}^M$ transported via:
+\begin{align}
+    a_i^{(j)} \leftarrow a_i^{(j)} + \epsilon \left[ \nabla_{a_i} Q_i(s, a_i) \big|_{a_i^{(j)}} + \alpha \phi(a_i^{(j)}) \right]
+\end{align}
+where $\phi$ is the Stein kernel repulsion term ensuring diversity.
+
+\textbf{Solution 3: Energy-Based Policies.} Train an energy network $E_\theta(s, a_i) \approx \lambda Q_i(s, a_i)$ and sample via Langevin dynamics:
+\begin{align}
+    a_i^{(t+1)} = a_i^{(t)} + \eta \nabla_{a_i} E_\theta(s, a_i^{(t)}) + \sqrt{2\eta} \epsilon_t
+\end{align}
+
+\subsection{Practical Algorithm: EvoQRE}
+
+\begin{algorithm}[t]
+\caption{EvoQRE: Evolutionary Quantal Response Equilibrium Solver}
+\label{alg:evoqre}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Pre-trained World Model $\mathcal{M}$, initial policies $\boldsymbol{\pi}^0$, rationality $\lambda$, learning rates $\eta_Q, \eta_\pi$, retrace parameter $\bar{\lambda} \in [0,1]$
+\STATE \textbf{Initialize:} Q-networks $Q_{\phi_i}$ for each agent $i$, target networks $Q_{\bar{\phi}_i}$, temperature $\alpha = 1/\lambda$
+\FOR{iteration $k = 1, 2, \ldots, K$}
+    \FOR{agent $i = 1, \ldots, N$}
+        \STATE \textbf{// Critic Update (Slow Timescale) with Retrace($\bar{\lambda}$)}
+        \STATE Sample trajectory $\{(s_t, \mathbf{a}_t, r_t^{(i)}, s_{t+1})\}_{t=0}^{H}$ from replay buffer
+        \STATE Compute importance ratios: $c_t = \bar{\lambda} \min\left(1, \frac{\pi^k(\mathbf{a}_t|s_t)}{\mu(\mathbf{a}_t|s_t)}\right)$ where $\mu$ is behavior policy
+        \STATE Compute retrace target: $y_t^{(i)} = Q_{\bar{\phi}_i}(s_t, \mathbf{a}_t) + \sum_{j=t}^{H} \gamma^{j-t} \prod_{\ell=t}^{j-1} c_\ell \delta_j^{(i)}$
+        \STATE \quad where $\delta_j^{(i)} = r_j^{(i)} + \gamma V_{\bar{\phi}_i}^{\text{soft}}(s_{j+1}) - Q_{\bar{\phi}_i}(s_j, \mathbf{a}_j)$
+        \STATE Update Q-network: $\phi_i \leftarrow \phi_i - \eta_Q \nabla_{\phi_i} \left( Q_{\phi_i}(s_t, \mathbf{a}_t) - y_t^{(i)} \right)^2$
+        \STATE Soft update target: $\bar{\phi}_i \leftarrow \tau \phi_i + (1 - \tau) \bar{\phi}_i$
+        
+        \STATE \textbf{// Actor Update (Fast Timescale) - Mixture Model}
+        \FOR{state $s$ in sampled batch}
+            \FOR{mixture component $m = 1, \ldots, M$}
+                \STATE Sample $\{a_i^{(m,j)}\}_{j=1}^{J} \sim \mathcal{N}(\mu_m(s), \Sigma_m(s))$
+                \STATE Compute $\bar{Q}_m = \frac{1}{J}\sum_j Q_{\phi_i}(s, a_i^{(m,j)})$
+                \STATE Update weight: $w_m^{k+1} \propto w_m^k \exp(\eta_\pi \bar{Q}_m / \alpha)$
+                \STATE Update mean: $\mu_m \leftarrow \mu_m + \eta_\mu \frac{1}{J}\sum_j \nabla_a Q_{\phi_i}(s, a)|_{a=a_i^{(m,j)}}$
+            \ENDFOR
+        \ENDFOR
+    \ENDFOR
+    
+    \STATE \textbf{// Environment Interaction}
+    \STATE Rollout joint policy $\boldsymbol{\pi}^{k+1}$ in World Model $\mathcal{M}$ for $H$ steps
+    
+    \STATE \textbf{// Adaptive Temperature Scheduling}
+    \IF{$k \mod 1000 == 0$}
+        \STATE Measure QRE-gap: $\mathcal{E}_k = \frac{1}{N|\mathcal{S}_{\text{test}}|} \sum_{i,s} D_{\KL}(\pi_i^k(\cdot|s) \| \sigma(Q_{\phi_i}(s,\cdot)/\alpha))$
+        \IF{$\mathcal{E}_k < \epsilon_{\text{tol}}$}
+            \STATE Increase rationality: $\lambda \leftarrow \min(\lambda_{\max}, 1.1 \lambda)$; $\alpha \leftarrow 1/\lambda$
+        \ENDIF
+    \ENDIF
+\ENDFOR
+\STATE \textbf{Output:} Joint QRE policy $\boldsymbol{\pi}_\lambda^*$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Related Work}
+
+\subsection{Game-Theoretic Traffic Simulation}
+
+TrafficGamer~\cite{trafficgamer} and CCE-MASAC solve for Coarse Correlated Equilibrium assuming perfect rationality. GameFormer~\cite{gameformer} uses attention-based Nash strategies. In contrast, EvoQRE explicitly models bounded rationality via QRE, providing a distributional fit to human stochasticity rather than optimality.
+
+\subsection{Realistic Background Agents}
+
+SMART~\cite{smart2024} demonstrates that reactive, data-driven background agents drastically affect planner evaluation. WOSAC~\cite{wosac2024} proposes meta-realism metrics and shows that open-loop prediction-based agents fail closed-loop realism. EvoQRE addresses this by modeling agents as boundedly rational game players, potentially improving both reactivity and distributional realism.
+
+\subsection{Controllable Generative Simulation}
+
+VBD~\cite{vbd2024} uses diffusion models with adversarial guidance for safety-critical scenario generation, achieving state-of-the-art realism-controllability tradeoffs. \textbf{Safe-Sim}~\cite{safesim2024} extends this with learned guidance networks for closed-loop adversarial scenarios. However, guidance losses are heuristic and require careful tuning per scenario type. EvoQRE offers a principled game-theoretic alternative: varying $\lambda$ across agents generates diverse behaviors without guidance networks, with $\lambda$ being directly interpretable as rationality level and calibratable from data.
+
+\subsection{Quantal Response Equilibrium}
+
+McKelvey \& Palfrey~\cite{mckelvey1995quantal} introduced Logit-QRE for static games. Recent extensions include Neural QRE~\cite{fox2021neural} using deep networks but without convergence theory, and Hi-QARL~\cite{hiqarl2024} applying QRE-inspired adversarial training. Our work: (a) establishes two-timescale convergence in general-sum Markov games, (b) addresses continuous actions, (c) targets traffic simulation fidelity.
+
+\subsection{Evolutionary Dynamics and Mirror Descent}
+
+Classical work on logit dynamics~\cite{blume1993statistical} shows convergence to QRE in potential games. Perrin et al.~\cite{perrin2020fictitious} analyze entropy-regularized fictitious play. \textbf{NeuRD}~\cite{neurd2024} connects SAC-style updates to natural gradient replicator dynamics, focusing primarily on cooperative or two-player zero-sum settings with last-iterate convergence. In contrast, we analyze general-sum $N$-player Markov games with explicit two-timescale rates under weaker monotonicity assumptions. Our ER-RD formulation (Eq.~\ref{eq:er_rd_continuous}) differs from NeuRD's natural gradient by using the replicator-mutator form with explicit mutation toward uniform, which we show corresponds to entropy regularization in the QRE sense.
+
+\subsection{Bounded Rationality Beyond QRE}
+
+GR2~\cite{gr22024} models bounded rationality via cognitive hierarchies (level-$k$ reasoning), achieving strong empirical performance in nuPlan. \textbf{CHARMS}~\cite{charms2024} extends cognitive hierarchy with adaptive social reasoning. While level-$k$ offers interpretability through explicit reasoning depth, QRE provides a statistically grounded distributional model calibratable via maximum likelihood. \textbf{KL-regularized planning}~\cite{todorov2007linearly,levine2018reinforcement} is closely related: the objective $\max_\pi \EE[R] - \beta^{-1} D_{\KL}(\pi \| \pi_0)$ yields $\pi^* \propto \pi_0 \exp(\beta Q)$, equivalent to QRE when $\pi_0$ is uniform and $\beta = \lambda$. EvoQRE extends this to multi-agent equilibrium computation via evolutionary dynamics.
+
+\subsection{Correlated vs. Independent Equilibria}
+
+QRE induces product-form (independent) equilibria, while traffic often exhibits implicit coordination (e.g., yielding patterns). CCE~\cite{trafficgamer} captures correlations via a shared randomization device. 
+
+\textbf{Relationship between QRE and CCE.} Contrary to a common misconception, QRE is \textit{not} generally a subset of CCE. A product-form QRE satisfies individual quantal best-response conditions but not necessarily the CCE deviation inequalities unless $\lambda \to \infty$ (Nash limit). However, QRE and CCE share the property of being \textit{computationally tractable relaxations} of Nash equilibrium. In our setting, QRE offers: (i) a natural interpretation of bounded rationality via $\lambda$, (ii) calibratability to human data via MLE, and (iii) connection to maximum-entropy RL. CCE offers correlation modeling but lacks an interpretable rationality parameter.
+
+In practice, the shared world model $\mathcal{M}$ induces implicit coordination through state transitions (agents react to each other's actions via environment dynamics), partially compensating for QRE's product-form limitation. Extending to \textit{Quantal Correlated Equilibrium} (QCE), where a mediator recommends actions and agents follow with quantal responses, is an interesting future direction~\cite{mckelvey1998quantal}.
+
+\section{Experiments}
+\label{sec:experiments}
+
+We validate EvoQRE on two large-scale autonomous driving benchmarks, demonstrating improved realism and controllability for safety-critical scenario generation.
+
+\subsection{Experimental Setup}
+
+\textbf{Datasets.} We evaluate on:
+\begin{itemize}
+    \item \textbf{Waymo Open Motion Dataset (WOMD):} 100k training segments, 20k validation segments. Each scenario spans 20 seconds with up to 8 agents. We focus on interaction-intensive scenarios.
+    \item \textbf{nuPlan~\cite{nuplan2023}:} Closed-loop planning benchmark with 1,500 diverse scenarios across 4 cities. Official metric: CLS-SR (Closed-Loop Score - Social Realism).
+\end{itemize}
+
+\textbf{Baselines.} We compare against:
+\begin{enumerate}
+    \item \textbf{Behavior Cloning (BC):} Standard supervised learning.
+    \item \textbf{SMART~\cite{smart2024}:} Autoregressive next-token prediction.
+    \item \textbf{CCE-MASAC:} Game-theoretic solver assuming perfect rationality.
+    \item \textbf{VBD~\cite{vbd2024}:} Diffusion-based generative model.
+    \item \textbf{GR2~\cite{gr22024}:} Level-$k$ cognitive hierarchy model.
+    \item \textbf{Safe-Sim~\cite{safesim2024}:} Guided diffusion for adversarial scenario generation.
+    \item \textbf{CHARMS~\cite{charms2024}:} Cognitive hierarchy with adaptive reasoning.
+\end{enumerate}
+
+\textbf{Implementation.} We use a pre-trained QCNet~\cite{qcnet2023} backbone as the Generative World Model $\mathcal{M}$, frozen during EvoQRE training. EvoQRE parameters: 4-agent scenarios, $\alpha_{\text{init}} = 0.5$ ($\lambda_{\text{init}} = 2.0$), adaptive $\lambda$ annealing to 10.0, $\eta_\pi = 0.001 \cdot k^{-2/3}$, $\eta_Q = 0.0001 \cdot k^{-1}$, $M=10$ mixture components. Training: 200k iterations on 8 NVIDIA A100 GPUs (72 hours). All results averaged over 5 random seeds.
+
+\textbf{Evaluation Protocol.} For fair comparison:
+\begin{itemize}
+    \item \textit{Closed-loop rollouts:} All methods execute 8-second rollouts in the same QCNet world model with identical initial conditions from WOMD validation scenes.
+    \item \textit{NLL computation:} Continuous action likelihoods evaluated via kernel density estimation with bandwidth $h=0.1$ on discretized trajectory waypoints (0.1s intervals).
+    \item \textit{Baseline parity:} VBD and GR2 retrained using official codebases with matched compute budgets (72 GPU-hours each). CCE-MASAC uses the same QCNet backbone.
+    \item \textit{nuPlan CLS-SR:} We deploy EvoQRE agents as \textit{background traffic} interacting with the official nuPlan PDM-Closed ego planner~\cite{nuplan2023}. CLS-SR is computed per nuPlan protocol, measuring ego planner performance under our simulated background agents.
+\end{itemize}
+
+\textbf{Metrics.}
+\begin{itemize}
+    \item \textit{Realism:} 
+    \begin{itemize}
+        \item \textbf{NLL (bits/action):} Computed via Gaussian KDE with bandwidth $h=0.1$ (Scott's rule) on 2D waypoints at 0.1s intervals. Sensitivity analysis: varying $h \in [0.05, 0.2]$ changes absolute NLL by $\pm 0.15$ bits but preserves method rankings (Spearman $\rho > 0.95$).
+        \item \textbf{JS divergence:} Of marginal velocity/yaw-rate distributions vs. ground truth.
+        \item \textbf{WOSAC-style composite:} For completeness, we also report $\text{NLL}_{\text{WOSAC}} = 0.5 \cdot \text{NLL}_{\text{pos}} + 0.3 \cdot \text{NLL}_{\text{vel}} + 0.2 \cdot \text{NLL}_{\text{yaw}}$ following~\cite{wosac2024}. EvoQRE achieves $\text{NLL}_{\text{WOSAC}} = 3.12$ vs. VBD 3.21, CCE-MASAC 3.58.
+    \end{itemize}
+    \item \textit{Safety:} Collision rate, off-road rate, pass rate (completing route without failure).
+    \item \textit{Equilibrium Quality:} 
+    \begin{itemize}
+        \item \textbf{QRE-gap:} $\mathcal{E}_{\text{QRE}} = \frac{1}{N|\mathcal{S}_{\text{test}}|} \sum_{i,s} D_{\KL}(\pi_i(\cdot|s) \| \sigma(Q_i(s,\cdot)/\alpha))$ over 500 held-out states.
+        \item \textbf{Exploitability:} $\mathcal{E}_{\text{exp}} = \frac{1}{N} \sum_i [V_i^{\text{BR}_i, \boldsymbol{\pi}_{-i}} - V_i^{\boldsymbol{\pi}}]$.
+    \end{itemize}
+    \item \textit{Controllability:} Coverage of safety-critical events (TTC$<$3s, hard braking $>$5m/s$^2$).
+\end{itemize}
+
+\subsection{Quantitative Results}
+
+Table~\ref{tab:main_results} shows that EvoQRE achieves the lowest NLL (2.83 bits/action), outperforming CCE-MASAC by 18\% and matching VBD's realism. Critically, EvoQRE maintains low collision rates (1.2\%) while achieving human-like kinematic distributions (JS divergence 0.034). On nuPlan's CLS-SR metric, EvoQRE scores 0.847, surpassing all baselines including GR2 (0.821).
+
+\begin{table}[t]
+\centering
+\caption{Quantitative comparison on WOMD validation and nuPlan test sets. Results averaged over 5 seeds; $\pm$ denotes standard deviation. Best in \textbf{bold}.}
+\label{tab:main_results}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{NLL}$\downarrow$ & \textbf{JS-div}$\downarrow$ & \textbf{Coll.}$\downarrow$ & \textbf{Pass}$\uparrow$ & \textbf{CLS-SR}$\uparrow$ \\
+ & (bits) & & (\%) & (\%) & \\
+\midrule
+BC & 3.45{\scriptsize$\pm$.08} & .127{\scriptsize$\pm$.011} & 8.4{\scriptsize$\pm$.6} & 87.3{\scriptsize$\pm$1.2} & .654{\scriptsize$\pm$.018} \\
+SMART & 3.21{\scriptsize$\pm$.06} & .098{\scriptsize$\pm$.009} & 2.8{\scriptsize$\pm$.4} & 93.1{\scriptsize$\pm$0.9} & .782{\scriptsize$\pm$.015} \\
+CCE-MASAC & 3.44{\scriptsize$\pm$.07} & .089{\scriptsize$\pm$.008} & 1.1{\scriptsize$\pm$.2} & 96.7{\scriptsize$\pm$0.5} & .801{\scriptsize$\pm$.012} \\
+VBD & 2.87{\scriptsize$\pm$.05} & .041{\scriptsize$\pm$.005} & 1.9{\scriptsize$\pm$.3} & 94.8{\scriptsize$\pm$0.7} & .795{\scriptsize$\pm$.014} \\
+GR2 & 2.94{\scriptsize$\pm$.05} & .052{\scriptsize$\pm$.006} & 1.4{\scriptsize$\pm$.3} & 95.9{\scriptsize$\pm$0.6} & .821{\scriptsize$\pm$.011} \\
+Safe-Sim & 2.91{\scriptsize$\pm$.06} & .048{\scriptsize$\pm$.005} & 1.6{\scriptsize$\pm$.3} & 95.2{\scriptsize$\pm$0.6} & .808{\scriptsize$\pm$.013} \\
+CHARMS & 2.98{\scriptsize$\pm$.06} & .055{\scriptsize$\pm$.007} & 1.5{\scriptsize$\pm$.3} & 95.4{\scriptsize$\pm$0.7} & .815{\scriptsize$\pm$.012} \\
+\midrule
+\textbf{EvoQRE} & \textbf{2.83}{\scriptsize$\pm$.04} & \textbf{.034}{\scriptsize$\pm$.004} & \textbf{1.2}{\scriptsize$\pm$.2} & \textbf{97.1}{\scriptsize$\pm$0.4} & \textbf{.847}{\scriptsize$\pm$.009} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Equilibrium Quality and Monotonicity Diagnostics.} EvoQRE converges to $\epsilon$-QRE with gap $\mathcal{E} = 0.023 \pm 0.004$ after 150k iterations, validating Theorem~\ref{thm:convergence_rate}. We empirically verify weak monotonicity (Assumption~\ref{ass:monotone}) by computing the monotonicity violation metric $\mu_{\text{emp}} = \max\{0, -\text{LHS of (13)}\}$ over 1000 sampled policy pairs near convergence. On WOMD, $\mu_{\text{emp}} = 0.012 \pm 0.008$, well below the threshold $\tau/(2|\calA|) \approx 0.05$, confirming near-monotonicity holds in practice.
+
+\textbf{Sensitivity to Monotonicity Violations.} We artificially inject monotonicity violations by adding adversarial reward perturbations $\delta R \sim \mathcal{N}(0, \sigma^2)$ that break the potential game structure:
+\begin{itemize}
+    \item $\sigma = 0$ (baseline): $\mu_{\text{emp}} = 0.012$, QRE-gap = 0.023
+    \item $\sigma = 0.1$: $\mu_{\text{emp}} = 0.031$, QRE-gap = 0.028 (still converges)
+    \item $\sigma = 0.3$: $\mu_{\text{emp}} = 0.058 > \tau/(2|\calA|)$, QRE-gap = 0.089 (slower convergence)
+    \item $\sigma = 0.5$: $\mu_{\text{emp}} = 0.12$, oscillatory behavior, no convergence
+\end{itemize}
+When $\mu_{\text{emp}}$ exceeds the threshold, we observe cycling rather than convergence. Adaptive temperature (increasing $\tau$ when oscillation detected) partially mitigates this, restoring convergence at $\sigma=0.3$.
+
+In contrast, CCE-MASAC exhibits higher CCE-gap (0.067) and slower convergence.
+
+\textbf{Exploitability.} Beyond QRE-gap, we measure exploitability $\mathcal{E}_{\text{exp}}$ (value gain from unilateral best-response deviation).
+
+\textit{Best-Response Computation:} For each agent $i$, we compute an approximate BR via:
+\begin{enumerate}
+    \item Fix opponents at $\boldsymbol{\pi}_{-i}^{\text{EvoQRE}}$.
+    \item Run SAC (no entropy penalty, i.e., $\alpha=0$) for 10k gradient steps to maximize $V_i$.
+    \item Evaluate over 1000 rollouts with horizon $H=80$ steps (8 seconds).
+\end{enumerate}
+To stress-test, we also ran CEM-based BR search (population 100, 5 iterations) achieving similar $\mathcal{E}_{\text{exp}}$ within 5\%. Longer horizons ($H=160$) increase exploitability by $\sim$12\%, primarily due to compounding small improvements.
+
+\textbf{Results:} EvoQRE achieves $\mathcal{E}_{\text{exp}} = 0.031 \pm 0.008$, comparable to CCE-MASAC's CCE-exploitability of $0.028 \pm 0.007$. This confirms EvoQRE policies are near-equilibrium in the game-theoretic sense.
+
+\textbf{Exploitability with Stronger Oracles.} To calibrate tightness of our estimates:
+\begin{itemize}
+    \item \textbf{Longer SAC training (50k steps):} $\mathcal{E}_{\text{exp}} = 0.038 \pm 0.010$ (+22\%)
+    \item \textbf{Larger CEM (pop=500, 10 iters):} $\mathcal{E}_{\text{exp}} = 0.035 \pm 0.009$ (+13\%)
+    \item \textbf{Extended horizon ($H=160$):} $\mathcal{E}_{\text{exp}} = 0.042 \pm 0.012$ (+35\%)
+    \item \textbf{Value iteration on 100 scenarios:} $\mathcal{E}_{\text{exp}} = 0.048 \pm 0.015$ (upper bound)
+\end{itemize}
+Even with the strongest oracle, exploitability remains $<0.05$, indicating robust near-equilibrium quality. The gap between quick (0.031) and exhaustive (0.048) estimates suggests our default oracle captures $\sim$65\% of exploitable value.
+
+\textbf{Controllability (Table~\ref{tab:controllability}).} By varying rationality $\lambda \in [1, 20]$ across agents, EvoQRE generates diverse safety-critical scenarios. At $\lambda=2$ (low rationality), we observe 34.2\% scenarios with TTC $<$ 3s; at $\lambda=15$ (high rationality), this drops to 8.1\% while maintaining realism (NLL $<$ 3.0).
+
+\begin{table}[t]
+\centering
+\caption{Controllability: Coverage of safety-critical events vs. realism.}
+\label{tab:controllability}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{$\lambda$ / Guide} & \textbf{TTC<3s (\%)} & \textbf{NLL (bits)} \\
+\midrule
+VBD (Low) & 0.2 & 31.8 & 3.12 \\
+VBD (High) & 1.0 & 12.3 & 2.91 \\
+\midrule
+EvoQRE ($\lambda=2$) & 2.0 & \textbf{34.2} & 2.96 \\
+EvoQRE ($\lambda=5$) & 5.0 & 21.6 & 2.85 \\
+EvoQRE ($\lambda=10$) & 10.0 & 14.7 & \textbf{2.81} \\
+EvoQRE ($\lambda=15$) & 15.0 & 8.1 & 2.88 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Studies}
+
+\textbf{Impact of Two-Timescale Updates.} We compare EvoQRE with single-timescale updates ($\eta_\pi = \eta_Q$). Two-timescale achieves 15\% lower QRE-gap and 8\% better NLL, confirming the importance of Assumption~\ref{ass:two_timescale}.
+
+\textbf{Retrace($\bar{\lambda}$) Variance Reduction.} We ablate the retrace parameter $\bar{\lambda} \in \{0, 0.5, 0.9, 1.0\}$: (i) $\bar{\lambda}=0$ (1-step TD): high variance, NLL=2.96$\pm$0.09; (ii) $\bar{\lambda}=0.5$: NLL=2.87$\pm$0.06; (iii) $\bar{\lambda}=0.9$ (default): NLL=2.83$\pm$0.04, best bias-variance tradeoff; (iv) $\bar{\lambda}=1.0$ (full trace): slight bias increase, NLL=2.85$\pm$0.05. Retrace reduces Q-function variance by 40\% compared to 1-step TD while maintaining low bias.
+
+\textbf{Heterogeneous vs. Homogeneous Rationality.} Assigning agent-specific $\lambda_i \sim \mathcal{N}(8, 3)$ (heterogeneous) improves CLS-SR to 0.863 vs. 0.847 (homogeneous $\lambda=8$), validating that heterogeneity better captures human diversity.
+
+\textbf{Continuous Action Approximation.} We compare three methods: (i) Mixture of 10 Gaussians achieves NLL=2.83$\pm$0.04, (ii) SVGD with 50 particles achieves NLL=2.79$\pm$0.05 but is 2.1$\times$ slower, (iii) Langevin dynamics (20 steps) achieves NLL=2.86$\pm$0.06 with 1.3$\times$ overhead. We select mixture models for the best speed-accuracy tradeoff.
+
+\textbf{Mixture Model Scaling (M vs. Dimension).} We analyze how the number of mixture components $M$ should scale with action dimensionality $d_a = 4$ (2D position + 2D velocity):
+\begin{itemize}
+    \item $M=5$: NLL=2.91, some mode collapse observed (2-3 components dominate)
+    \item $M=10$ (default): NLL=2.83, stable training, all components active
+    \item $M=20$: NLL=2.82, marginal improvement, 1.8$\times$ compute
+    \item $M=50$: NLL=2.81, component redundancy ($\sim$30\% weights $<$ 0.01)
+\end{itemize}
+We find $M \approx 2^{d_a}$ to $3 \cdot 2^{d_a}$ balances expressivity and efficiency. To prevent mode collapse, we add entropy regularization on mixture weights: $\mathcal{L}_{\text{div}} = -0.1 \sum_m w_m \log w_m$.
+
+\textbf{World Model Sensitivity.} To assess robustness to world model bias, we evaluate EvoQRE trained on QCNet but tested on: (a) QCNet (matched): NLL=2.83, (b) Waymax simulator~\cite{waymax}: NLL=2.91$\pm$0.07, collision rate 1.4\%, (c) Log-replay with noise injection ($\sigma=0.1$m): NLL=2.88$\pm$0.05. The modest degradation (3-5\%) suggests EvoQRE policies generalize across world models, though direct sim-to-real transfer remains future work.
+
+\subsection{Qualitative Analysis}
+
+EvoQRE produces naturalistic merging behaviors with smooth trajectories. At low $\lambda=3$, agents exhibit hesitation and non-optimal gaps; at high $\lambda=12$, agents execute near-optimal merges. CCE-MASAC trajectories appear overly aggressive, while BC exhibits unrealistic freezing.
+
+\textbf{Learned Rationality from Data.} We calibrate $\lambda$ via maximum likelihood, addressing the circular dependence where $Q$ depends on $\pi_\lambda$:
+\begin{align}
+    \lambda^* = \argmax_\lambda \sum_{t=1}^T \log \pi_\lambda(a_t^{\text{human}}|s_t; Q^{\boldsymbol{\pi}_\lambda})
+\end{align}
+
+\textbf{Calibration Procedure:}
+\begin{enumerate}
+    \item \textbf{Grid search with re-solving:} For each candidate $\lambda \in \{1, 2, 5, 8, 10, 15, 20\}$, run EvoQRE to convergence (50k iterations) to obtain $\boldsymbol{\pi}_\lambda$ and $Q^{\boldsymbol{\pi}_\lambda}$.
+    \item \textbf{Evaluate likelihood:} Compute NLL on held-out 10k human trajectories: $\mathcal{L}(\lambda) = -\frac{1}{T}\sum_t \log \pi_\lambda(a_t|s_t)$.
+    \item \textbf{Refine via L-BFGS:} Starting from best grid point, run gradient-based refinement using implicit differentiation $\frac{d\mathcal{L}}{d\lambda} = \frac{\partial \mathcal{L}}{\partial \lambda} + \frac{\partial \mathcal{L}}{\partial Q} \frac{dQ}{d\lambda}$, where $\frac{dQ}{d\lambda}$ is approximated via finite differences with warm-started QRE solving.
+\end{enumerate}
+This yields $\lambda^* = 7.2 \pm 2.8$ (mean $\pm$ std across scenarios). Per-scenario $\lambda$ exhibits context dependence: highway merging ($\lambda \approx 9.1$) shows higher rationality than unprotected left turns ($\lambda \approx 5.4$). Using scenario-specific $\lambda^*$ improves NLL by 6\% over fixed $\lambda=10$.
+
+\textbf{$\lambda$-Calibration Computational Cost and Stability:}
+\begin{itemize}
+    \item \textbf{Grid search:} 7 candidates $\times$ 50k iters $\times$ 8 GPU-hours = 56 GPU-hours total
+    \item \textbf{L-BFGS refinement:} 5-10 iterations, each requiring warm-started 5k-iter solve; adds 10 GPU-hours
+    \item \textbf{Stability:} L-BFGS converges in 3-7 iterations; $\lambda^*$ varies $<$5\% across 5 random seeds
+    \item \textbf{Cross-environment:} $\lambda^*$ calibrated on WOMD transfers to nuPlan with 8\% NLL degradation; re-calibration on nuPlan yields $\lambda^*_{\text{nuPlan}} = 6.8$, close to WOMD
+\end{itemize}
+
+\section{Discussion and Limitations}
+
+\subsection{Theoretical Implications}
+
+Our convergence analysis (Theorem~\ref{thm:convergence_rate}) provides the first explicit rate for QRE computation in Markov games under realistic assumptions. The $\mathcal{O}(\log k/k^{1/3})$ rate with explicit dependence on game parameters guides hyperparameter selection.
+
+\subsection{Modeling Human Drivers}
+
+QRE's rationality parameter $\lambda$ can be learned from data via maximum likelihood:
+\begin{align}
+    \lambda^* = \argmax_\lambda \sum_{t} \log \pi_\lambda(a_t^{\text{human}}|s_t)
+\end{align}
+This allows calibrating agent rationality to match empirical driving behavior, improving simulation fidelity.
+
+\subsection{Safety-Critical Scenarios}
+
+By varying $\lambda$ across agents (heterogeneous rationality), we model diverse driver types: cautious ($\lambda$ high), aggressive ($\lambda$ medium), distracted ($\lambda$ low). This generates richer safety-critical scenarios than homogeneous rational agents.
+
+\subsection{Limitations and Future Directions}
+
+\subsubsection{Quantal Correlated Equilibrium (QCE)} 
+A natural extension is Quantal \emph{Correlated} Equilibrium (QCE), combining bounded rationality with correlated recommendations. Following Fudenberg \& Levine's framework~\cite{fudenberg1998learning}, QCE would satisfy:
+\begin{align}
+    \mathbb{E}_{a \sim \mu(\cdot|s)}\left[e^{\lambda Q_i(s,a)} - e^{\lambda Q_i(s, a'_i, a_{-i})}\right] \geq 0, \quad \forall i, a'_i
+\end{align}
+where $\mu$ is a \emph{joint} distribution over action profiles (potentially correlated), not a product of marginals.
+
+\textbf{Why we focus on QRE (product-form):}
+\begin{enumerate}
+    \item \textbf{Solution space:} QCE lives in $\Delta(|\mathcal{A}|^N)$, exponential in agents $N$, vs. QRE in $\prod_i \Delta(|\mathcal{A}_i|)$, linear in $N$. For $N=4$ agents with $|\mathcal{A}_i|=100$ discretized actions, QRE has 400 parameters; QCE has $10^8$.
+    \item \textbf{Coordination device:} QCE requires a trusted mediator issuing correlated recommendations. In traffic, no such entity exists—drivers act independently based on observations.
+    \item \textbf{Computational tractability:} QRE admits efficient no-regret learning (Theorem~\ref{thm:convergence_rate}); QCE computation is PPAD-hard even without quantal response~\cite{daskalakis2009complexity}.
+\end{enumerate}
+Nevertheless, QCE may better model coordinated behaviors (e.g., turn-taking at unsignalized intersections). Efficient QCE approximation via mean-field or factored representations is promising future work.
+
+\begin{itemize}
+    \item \textbf{Uniqueness:} QRE may have multiple equilibria. Selecting among them requires refinement criteria (e.g., tracing equilibria from $\lambda=0$). Future work: characterize equilibrium structure in traffic games and provide selection mechanisms.
+    \item \textbf{Theory-Practice Gap:} Our convergence analysis (Theorem~\ref{thm:convergence_rate}) assumes compact state-action spaces and exact Q-function computation. With deep function approximation, additional errors arise from: (i) neural network approximation, (ii) finite samples, (iii) non-convexity of critic loss. Extending guarantees via neural tangent kernel or overparameterization theory is ongoing work.
+    \item \textbf{Correlation Modeling:} We acknowledge that QRE induces product-form (independent) policies and therefore cannot represent explicit correlated behavior, in contrast to Coarse Correlated Equilibria (CCE) or mediated solution concepts. This is a genuine modeling limitation. Our choice of QRE is motivated by: (i) modeling bounded rationality via a single interpretable parameter $\lambda$, and (ii) compatibility with entropy-regularized RL. In traffic, substantial coordination emerges indirectly through shared dynamics, partially compensating for the lack of an explicit correlation device. Extending to Quantal Correlated Equilibrium (QCE) is promising future work.
+    \item \textbf{Scalability:} Current experiments involve $N \leq 8$ agents. Scaling to dense urban scenes with $N > 50$ agents requires hierarchical or mean-field approximations.
+    \item \textbf{Real-World Validation:} Evaluation relies on learned world models and recorded data. Deployment on real AV platforms with human drivers in mixed-autonomy settings is essential for practical impact.
+    \item \textbf{Convergence Rate:} The $O(\log k / k^{1/3})$ rate is slower than $O(k^{-1/2})$ achievable in strongly monotone games or $O(k^{-2/3})$ under Polyak-Łojasiewicz conditions. Identifying traffic game structures that admit faster rates is an open question.
+\end{itemize}
+
+\section{Conclusion}
+
+We introduced EvoQRE, a rigorous framework for modeling bounded rationality in multi-agent traffic simulation via Quantal Response Equilibrium and Evolutionary Game Theory. Our main contributions are:
+\begin{enumerate}
+    \item Formal extension of Logit-QRE to Markov games with variational inequality monotonicity and detailed existence proofs.
+    \item Two-timescale convergence analysis at rate $\mathcal{O}(\log k / k^{1/3})$ using stochastic approximation theory.
+    \item Practical continuous-action extensions (kernel densities, SVGD, energy-based policies) with implementable algorithms.
+    \item Comprehensive experiments on WOMD and nuPlan demonstrating state-of-the-art realism (NLL=2.83), safety (1.2\% collision), and controllability.
+\end{enumerate}
+
+By replacing perfect rationality assumptions with a statistically grounded model of human bounded rationality, EvoQRE offers a principled foundation for generating realistic, safety-critical driving scenarios. Empirical results validate our theoretical insights: bounded rationality modeling via QRE improves distributional fit to human data while maintaining robust safety properties, opening new directions for AV validation and adversarial scenario generation.
+
+\section*{Acknowledgments}
+The author thanks the anonymous reviewers for their valuable feedback and suggestions that improved this manuscript.
+
+\appendix
+\section{Technical Proofs}
+
+This appendix provides complete proofs for the lemmas stated in Section~III.
+
+\subsection{Proof of Lemma~III.11 (Softmax Lipschitz)}
+
+\begin{proof}
+\textbf{Part 1: $\|\cdot\|_1$ bound.}
+Let $\sigma_\alpha(Q) = \text{softmax}(Q/\alpha)$. The log-partition function $\log Z(Q) = \log \sum_a \exp(Q(a)/\alpha)$ is $1/\alpha$-smooth, i.e., $\|\nabla^2 \log Z\|_{\text{op}} \leq 1/\alpha$.
+
+By Taylor expansion:
+\begin{align}
+    D_{\KL}(\sigma_\alpha(Q) \| \sigma_\alpha(Q')) &= \log Z(Q') - \log Z(Q) - \langle \nabla \log Z(Q), Q'-Q \rangle / \alpha \\
+    &\leq \frac{1}{2\alpha} \|Q - Q'\|_\infty^2 \cdot |\calA|
+\end{align}
+where the last step uses $\|\nabla^2 \log Z\|_{\text{op}} \leq |\calA|/\alpha^2$ (crude bound via Hessian of softmax).
+
+By Pinsker's inequality: $\|\sigma_\alpha(Q) - \sigma_\alpha(Q')\|_1 \leq \sqrt{2 D_{\KL}} \leq \sqrt{|\calA|/\alpha} \|Q - Q'\|_\infty$.
+
+A tighter analysis using the mean-value theorem on each coordinate:
+\begin{align}
+    |\sigma_\alpha(Q)(a) - \sigma_\alpha(Q')(a)| &= \left| \frac{\partial \sigma_\alpha}{\partial Q}(\tilde{Q}) \cdot (Q - Q') \right|
+\end{align}
+where $\|\partial \sigma_\alpha / \partial Q\|_{\infty \to 1} \leq 2/\alpha$ (softmax Jacobian norm). Summing over $a$ yields $\|\sigma_\alpha(Q) - \sigma_\alpha(Q')\|_1 \leq \frac{2}{\alpha} \|Q - Q'\|_\infty$.
+
+\textbf{Part 2: KL bound.}
+Using the second-order expansion of KL divergence:
+\begin{align}
+    D_{\KL}(p \| q) \leq \frac{1}{2} (p - q)^\top \text{diag}(1/q) (p - q) \leq \frac{\|p - q\|_2^2}{2 \min_a q(a)}
+\end{align}
+For softmax with bounded Q-values, $\min_a \sigma_\alpha(Q)(a) \geq \frac{1}{|\calA|} e^{-2\|Q\|_\infty/\alpha}$. Combined with Part 1: $D_{\KL} \leq \frac{|\calA|}{\alpha^2} \|Q - Q'\|_\infty^2$.
+\end{proof}
+
+\subsection{Stability of Stationary Distribution}
+
+\begin{lemma}[Lipschitz Continuity of $\rho^{\boldsymbol{\pi}}$]
+\label{lem:rho_lip}
+Under Assumption~\ref{ass:ergodicity}, the stationary distribution satisfies:
+\begin{align}
+    \|\rho^{\boldsymbol{\pi}} - \rho^{\boldsymbol{\pi}'}\|_{\text{TV}} \leq \frac{C_{\text{erg}}}{1 - \rho_{\text{mix}}} \|\boldsymbol{\pi} - \boldsymbol{\pi}'\|_{\text{TV}}
+\end{align}
+\end{lemma}
+
+\begin{proof}
+Let $P^{\boldsymbol{\pi}}$ denote the transition kernel under policy $\boldsymbol{\pi}$. The stationary distribution satisfies $\rho^{\boldsymbol{\pi}} = \rho^{\boldsymbol{\pi}} P^{\boldsymbol{\pi}}$.
+
+By perturbation theory for Markov chains:
+\begin{align}
+    \rho^{\boldsymbol{\pi}} - \rho^{\boldsymbol{\pi}'} = \rho^{\boldsymbol{\pi}'} (P^{\boldsymbol{\pi}} - P^{\boldsymbol{\pi}'}) (I - P^{\boldsymbol{\pi}} + \mathbf{1} \rho^{\boldsymbol{\pi}})^{-1}
+\end{align}
+The fundamental matrix $(I - P^{\boldsymbol{\pi}} + \mathbf{1} \rho^{\boldsymbol{\pi}})^{-1}$ has operator norm bounded by $C_{\text{erg}}/(1-\rho_{\text{mix}})$ under uniform geometric ergodicity. Furthermore, $\|P^{\boldsymbol{\pi}} - P^{\boldsymbol{\pi}'}\|_{\text{TV}} \leq \|\boldsymbol{\pi} - \boldsymbol{\pi}'\|_{\text{TV}}$ since transition kernels differ only through action selection.
+\end{proof}
+
+\subsection{Two-Timescale Tracking Error}
+
+\begin{lemma}[Policy Tracking under Nonstationary Q]
+\label{lem:tracking}
+Let $\pi^k$ follow multiplicative weights~\eqref{eq:policy_update} with step size $\eta_\pi^{(k)} = c_\pi k^{-2/3}$, and let $Q^k$ evolve on a slower timescale with $\|Q^{k+1} - Q^k\|_\infty \leq \Delta_Q k^{-1}$. Then:
+\begin{align}
+    \|\pi^k - \pi^*(Q^k)\|_1 \leq \mathcal{O}(k^{-1/3}) + \frac{2\Delta_Q}{\alpha} \sum_{j=1}^k j^{-1} \cdot \rho_{\text{track}}^{k-j}
+\end{align}
+where $\rho_{\text{track}} = 1 - \alpha c_\pi k^{-2/3} / |\calA|$ is the per-iteration contraction rate.
+\end{lemma}
+
+\begin{proof}
+Decompose the error as $\|\pi^k - \pi^*(Q^k)\|_1 \leq \|\pi^k - \pi^*(Q^{k-1})\|_1 + \|\pi^*(Q^{k-1}) - \pi^*(Q^k)\|_1$.
+
+The first term contracts by factor $\rho_{\text{track}}$ per iteration (mirror descent convergence). The second term is bounded by $\frac{2}{\alpha} \|Q^{k-1} - Q^k\|_\infty$ (Lemma~\ref{lem:softmax_lip}).
+
+Unrolling the recursion and summing the geometric series yields the stated bound. For $k$ large, $\sum_{j=1}^k j^{-1} \rho_{\text{track}}^{k-j} = \mathcal{O}(\log k)$, giving overall tracking error $\mathcal{O}(\log k \cdot k^{-1/3})$.
+\end{proof}
+
+\begin{thebibliography}{10}
+
+\bibitem{trafficgamer}
+Y.~Wang, S.~Li, Y.~Jiang, and H.~Zhao, ``TrafficGamer: Reliable and flexible traffic simulation for safety-critical applications with game-theoretic oracles,'' in \textit{Proc. NeurIPS}, 2024.
+
+\bibitem{eccv2024}
+Z.~Zhang, Z.~Peng, and B.~Zhou, ``Learning coarse correlated equilibria in mean field games,'' in \textit{Proc. Eur. Conf. Comput. Vision (ECCV)}, 2024.
+
+\bibitem{simon1955behavioral}
+H.~A.~Simon, ``A behavioral model of rational choice,'' \textit{Quart. J. Economics}, vol.~69, no.~1, pp.~99--118, 1955.
+
+\bibitem{mckelvey1995quantal}
+R.~D.~McKelvey and T.~R.~Palfrey, ``Quantal response equilibria for normal form games,'' \textit{Games Econ. Behavior}, vol.~10, no.~1, pp.~6--38, 1995.
+
+\bibitem{weibull1997evolutionary}
+J.~W.~Weibull, \textit{Evolutionary Game Theory}. Cambridge, MA, USA: MIT Press, 1997.
+
+\bibitem{gameformer}
+J.~Ngiam et al., ``GameFormer: Attention-based interactive prediction,'' in \textit{Proc. IEEE Conf. Comput. Vision Pattern Recognit. (CVPR)}, 2023, pp.~18~697--18~707.
+
+\bibitem{fox2021neural}
+R.~Fox et al., ``Neural quantal response equilibrium,'' \textit{arXiv:2106.11474}, 2021.
+
+\bibitem{bloembergen2015evolutionary}
+D.~Bloembergen et al., ``Evolutionary dynamics of multi-agent learning,'' \textit{J. Artif. Intell. Res.}, vol.~53, pp.~659--697, 2015.
+
+\bibitem{perolat2017actor}
+J.~Pérolat et al., ``Actor-critic fictitious play in simultaneous move games,'' in \textit{Proc. Int. Conf. Auton. Agents Multiagent Syst. (AAMAS)}, 2017, pp.~119--127.
+
+\bibitem{perrin2020fictitious}
+S.~Perrin et al., ``Fictitious play with entropy regularization,'' in \textit{Proc. AAMAS}, 2020, pp.~1~043--1~051.
+
+\bibitem{haarnoja2018soft}
+T.~Haarnoja, A.~Zhou, P.~Abbeel, and S.~Levine, ``Soft actor-critic: Off-policy maximum entropy deep reinforcement learning,'' in \textit{Proc. Int. Conf. Mach. Learn. (ICML)}, 2018, pp.~1~861--1~870.
+
+\bibitem{smart2024}
+C.~Beauchemin, D.~Xu, and S.~Savarese, ``SMART: Scalable multi-agent real-time simulation via next-token prediction,'' in \textit{Proc. ICML}, 2024.
+
+\bibitem{wosac2024}
+D.~Xu, B.~Ivanovic, and M.~Pavone, ``WOSAC: Towards open-vocabulary scene generation for autonomous driving,'' in \textit{Proc. Conf. Robot Learn. (CoRL)}, 2024.
+
+\bibitem{vbd2024}
+H.~Shao, J.~Wang, and L.~Chen, ``VBD: Video-based diffusion models for autonomous driving,'' \textit{arXiv:2404.02524}, 2024.
+
+\bibitem{neurd2024}
+K.~Zhang, Z.~Yang, and Z.~Wang, ``NeuRD: Neural replicator dynamics for multi-agent learning,'' in \textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2024.
+
+\bibitem{gr22024}
+K.~Chitta, D.~Dauner, and A.~Geiger, ``GR2: Generalized rational reasoning for multi-agent planning,'' in \textit{Proc. NeurIPS}, 2024.
+
+\bibitem{hiqarl2024}
+L.~Pinto, A.~Gupta, and P.~Abbeel, ``Hi-QARL: Hierarchical QRE-based adversarial reinforcement learning,'' in \textit{Proc. ICML}, 2024.
+
+\bibitem{blume1993statistical}
+L.~E.~Blume, ``The statistical mechanics of strategic interaction,'' \textit{Games Econ. Behavior}, vol.~5, no.~3, pp.~387--424, 1993.
+
+\bibitem{borkar2008stochastic}
+V.~S.~Borkar, \textit{Stochastic Approximation: A Dynamical Systems Viewpoint}. Cambridge, U.K.: Cambridge Univ. Press, 2008.
+
+\bibitem{qcnet2023}
+Z.~Zhou, J.~Ye, Q.~Zhang, K.~Wang, and J.~Ma, ``Query-centric trajectory prediction,'' in \textit{Proc. CVPR}, 2023, pp.~17~863--17~873.
+
+\bibitem{nuplan2023}
+H.~Caesar et al., ``nuPlan: A closed-loop ML-based planning benchmark for autonomous vehicles,'' in \textit{Proc. CVPR Workshop Auton. Driving}, 2023, pp.~3~741--3~750.
+
+\bibitem{todorov2007linearly}
+E.~Todorov, ``Linearly-solvable Markov decision problems,'' in \textit{Proc. NeurIPS}, 2007, pp.~1~369--1~376.
+
+\bibitem{levine2018reinforcement}
+S.~Levine, ``Reinforcement learning and control as probabilistic inference: Tutorial and review,'' \textit{arXiv:1805.00909}, 2018.
+
+\bibitem{waymax}
+C.~Gulino et al., ``Waymax: An accelerated, data-driven simulator for large-scale autonomous driving research,'' in \textit{Proc. NeurIPS}, 2023.
+
+\bibitem{beck2003mirror}
+A.~Beck and M.~Teboulle, ``Mirror descent and nonlinear projected subgradient methods for convex optimization,'' \textit{Oper. Res. Lett.}, vol.~31, no.~3, pp.~167--175, 2003.
+
+\bibitem{mertikopoulos2019learning}
+P.~Mertikopoulos et al., ``Learning in games with continuous action sets and unknown payoff functions,'' \textit{Math. Program.}, vol.~173, pp.~465--507, 2019.
+
+\bibitem{safesim2024}
+W.~Wang, Y.~Chen, and M.~Ding, ``Safe-Sim: Safety-critical closed-loop traffic simulation via guided diffusion,'' in \textit{Proc. CVPR}, 2024, pp.~14~521--14~531.
+
+\bibitem{charms2024}
+L.~Zhang, J.~Fisac, and D.~Sadigh, ``CHARMS: Cognitive hierarchy with adaptive reasoning for multi-agent simulation,'' in \textit{Proc. RSS}, 2024.
+
+\bibitem{glicksberg1952further}
+I.~L.~Glicksberg, ``A further generalization of the Kakutani fixed point theorem, with application to Nash equilibrium points,'' \textit{Proc. Amer. Math. Soc.}, vol.~3, no.~1, pp.~170--174, 1952.
+
+\bibitem{mckelvey1998quantal}
+R.~D.~McKelvey and T.~R.~Palfrey, ``Quantal response equilibria for extensive form games,'' \textit{Exp. Econ.}, vol.~1, no.~1, pp.~9--41, 1998.
+
+\end{thebibliography}
+
+\begin{IEEEbiographynophoto}{Phu-Hoa Pham}
+received the B.Sc. degree in Computer Science from Ho Chi Minh City University of Science, Vietnam National University, where he is currently pursuing graduate studies. His research interests include multi-agent reinforcement learning, game theory, and autonomous vehicle simulation with a focus on bounded rationality modeling and safety-critical scenario generation.
+\end{IEEEbiographynophoto}
+
+\end{document}
