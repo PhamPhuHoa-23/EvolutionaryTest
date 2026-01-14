@@ -108,6 +108,9 @@ venv.bak/
 .idea
 .vscode
 
+# Notebooks (Kaggle development)
+notebooks/
+
 # seed project
 lightning_logs/
 performance/
