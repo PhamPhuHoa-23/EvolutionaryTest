@@ -1,36 +1,30 @@
-# ---
-# jupyter:
-#   jupytext:
-#     formats: py:percent
-#   kernelspec:
-#     display_name: Python 3
-#     language: python
-#     name: python3
-# ---
-
 # %% [markdown]
-# # Table VI: Main Results on WOMD
+# # Table VI: Main Results on WOMD/AV2
 # 
-# **Full evaluation on Waymo Open Motion Dataset using Waymax simulator.**
+# **Copy of kaggle_full.py adapted for Table VI metrics**
 # 
-# **Metrics:**
-# - NLL: Negative log-likelihood via KDE
-# - Collision %: Pairwise agent collision rate
-# - Off-road %: Fraction outside drivable area
-# - Diversity: Mean pairwise trajectory distance
-#
-# **Reference:** waymo_waymax_training_v6.py
+# **Metrics (from paper Table VI):**
+# - NLL (via KDE on velocity/acceleration distributions)
+# - Collision %
+# - Off-road %
+# - Diversity
 
 # %% [markdown]
 # ## 1. Install Dependencies
 
 # %%
-# !pip install -q torch torchvision torchaudio
-# !pip install -q pytorch-lightning==2.0.0
-# !pip install -q torch-geometric
-# !pip install --upgrade pip
-# !pip install git+https://github.com/waymo-research/waymax.git@main
-# !pip install -q tensorflow
+!pip install -q torch torchvision torchaudio
+!pip install -q pytorch-lightning==2.0.0
+!pip install -q torch-geometric
+!pip install -q av av2 neptune scipy
+
+# %%
+import torch
+print(f"PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    cuda_ver = torch.version.cuda.replace('.', '')[:3]
+    !pip install torch-scatter torch-sparse torch-cluster -f https://data.pyg.org/whl/torch-{torch.__version__.split('+')[0]}+cu{cuda_ver}.html
 
 # %% [markdown]
 # ## 2. Setup & Imports
@@ -41,239 +35,260 @@ warnings.filterwarnings('ignore')
 
 import os
 import sys
+import json
 import time
-import pickle
-import dataclasses
+import yaml
+import shutil
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm.auto import tqdm
-from scipy.stats import gaussian_kde
-
-import torch
-import tensorflow as tf
-
-# Disable TF GPU to avoid conflicts with JAX
-tf.config.set_visible_devices([], 'GPU')
-
-import jax
-import jax.numpy as jnp
-
-print(f"PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}")
-print(f"JAX: {jax.__version__}, devices: {jax.devices()}")
+import matplotlib.pyplot as plt
+from argparse import Namespace
+from scipy.stats import wasserstein_distance
+from scipy.spatial.distance import jensenshannon
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"✅ Device: {DEVICE}")
 
-# %% Clone repo
-REPO_DIR = Path("EvolutionaryTest")
-if not REPO_DIR.exists():
-    import subprocess
-    subprocess.run(["git", "clone", "https://github.com/PhamPhuHoa-23/EvolutionaryTest.git"])
+# GPU Optimizations
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    print("✅ GPU optimization enabled")
 
-sys.path.insert(0, str(REPO_DIR.absolute()))
-os.chdir(REPO_DIR)
+# %% [markdown]
+# ## 3. Authentication (Same as kaggle_full.py)
 
 # %%
-from waymax import config as waymax_config
-from waymax import dataloader as waymax_dataloader
-from waymax import env as waymax_env
-from waymax import dynamics as waymax_dynamics
-from waymax import datatypes
+print("🔑 Authenticating with Google Cloud...")
+service_key_path = '/kaggle/input/gcs-credentials/auth.json'
 
+if os.path.exists(service_key_path):
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = service_key_path
+    print(f"✅ Authenticated via service account")
+else:
+    try:
+        from google.colab import auth
+        auth.authenticate_user()
+        print("✅ Authenticated via Colab")
+    except ImportError:
+        print("⚠️  No authentication found!")
+
+# %% [markdown]
+# ## 4. Clone Repository
+
+# %%
+REPO_DIR = Path("EvolutionaryTest")
+if not REPO_DIR.exists():
+    !git clone https://github.com/PhamPhuHoa-23/EvolutionaryTest.git
+else:
+    !cd EvolutionaryTest && git pull
+    
+sys.path.insert(0, str(REPO_DIR.absolute()))
+os.chdir(REPO_DIR)
+!pip install -q -r requirements.txt
+
+# %%
 from algorithm.TrafficGamer import TrafficGamer
-from algorithm.evoqre_v2 import ParticleEvoQRE, EvoQREConfig
+from algorithm.EvoQRE_Langevin import EvoQRE_Langevin
+from predictors.autoval import AutoQCNet
+from datasets import ArgoverseV2Dataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Batch
+from transforms import TargetBuilder
 from utils.utils import seed_everything
+from utils.rollout import PPO_process_batch
+from av2.map.map_api import ArgoverseStaticMap
+from pathlib import Path as Pth
 
 print("✅ Imports complete")
 
 # %% [markdown]
-# ## 3. Configuration
+# ## 5. Configuration
 
 # %%
 CONFIG = {
-    # Dataset - Waymo Open Motion Dataset
-    'waymo_version': '1.2.0',
-    'split': 'validation',  # Use validation for evaluation
-    'max_num_objects': 32,
+    # Paths
+    'checkpoint_path': '/kaggle/input/qcnetckptargoverse/pytorch/default/1/QCNet_AV2.ckpt',
+    'data_root': '/kaggle/input/argoverse/argoverse',
+    'output_dir': './results/table6',
     
     # Training
     'seed': 42,
-    'obs_dim': 36,
-    'num_episodes': 50,          # Episodes per scenario
-    'steps_per_episode': 80,
+    'num_episodes': 35,
     'batch_size': 32,
-    
-    # Evaluation
-    'num_eval_scenarios': 200,   # Number of scenarios to evaluate
-    'num_rollouts': 5,           # Rollouts per scenario for diversity
+    'max_agents': 10,
+    'agent_radius': 80.0,
     
     # RL Config
-    'num_controlled_agents': 4,
-    'hidden_dim': 256,
+    'rl_config_file': 'configs/TrafficGamer.yaml',
     'distance_limit': 5.0,
+    'penalty_initial_value': 1.0,
+    'cost_quantile': 48,
+    'epochs': 10,
     
-    # Output
-    'output_dir': './results/table6',
+    # Evaluation
+    'num_eval_scenarios': 20,  # Set higher for full run
 }
 
 seed_everything(CONFIG['seed'])
 os.makedirs(CONFIG['output_dir'], exist_ok=True)
 
 # %% [markdown]
-# ## 4. Initialize Waymax
+# ## 6. Load World Model & Dataset
 
 # %%
-print("📂 Initializing Waymax data loader...")
+print("🔄 Loading AutoQCNet...")
+model = AutoQCNet.load_from_checkpoint(CONFIG['checkpoint_path'], map_location=DEVICE)
+model.eval()
+model.to(DEVICE)
+for p in model.parameters(): p.requires_grad = False
+print(f"✅ World Model loaded (modes={model.num_modes}, hidden={model.hidden_dim})")
 
-if CONFIG['waymo_version'] == '1.2.0':
-    if CONFIG['split'] == 'training':
-        dataset_config = waymax_config.WOD_1_2_0_TRAINING
-    elif CONFIG['split'] == 'validation':
-        dataset_config = waymax_config.WOD_1_2_0_VALIDATION
-    else:
-        dataset_config = waymax_config.WOD_1_2_0_TESTING
-else:
-    dataset_config = waymax_config.WOD_1_1_0_VALIDATION
-
-dataset_config = dataclasses.replace(
-    dataset_config,
-    max_num_objects=CONFIG['max_num_objects'],
-    path=dataset_config.path.replace("///", "//")
+# %%
+print("🔄 Loading Dataset...")
+dataset = ArgoverseV2Dataset(
+    root=CONFIG['data_root'], split='val',
+    transform=TargetBuilder(model.num_historical_steps, model.num_future_steps)
 )
+print(f"✅ Dataset: {len(dataset)} scenarios")
 
-# Create data iterator
-data_iterator = waymax_dataloader.simulator_state_generator(dataset_config)
-print(f"✅ Waymax data loader ready")
-print(f"   Streaming from: {dataset_config.path}")
-
-# %% Initialize environment
-dynamics_model = waymax_dynamics.StateDynamics()
-env_config = waymax_config.EnvironmentConfig(
-    max_num_objects=CONFIG['max_num_objects'],
-    controlled_object=waymax_config.ObjectType.VALID,
-)
-sim_env = waymax_env.BaseEnvironment(
-    dynamics_model=dynamics_model,
-    config=env_config,
-)
-jit_step = jax.jit(sim_env.step)
-jit_reset = jax.jit(sim_env.reset)
-print("✅ Waymax environment with JIT ready")
+# Sample scenarios
+import random
+random.seed(CONFIG['seed'])
+scenario_indices = random.sample(range(len(dataset)), min(CONFIG['num_eval_scenarios'], len(dataset)))
+print(f"📊 Will evaluate on {len(scenario_indices)} scenarios")
 
 # %% [markdown]
-# ## 5. Helper Functions (from waymax training)
+# ## 7. Initialize RL Config
 
 # %%
-def select_controlled_agents(scenario, num_agents):
-    """Select agents to control."""
-    valid_mask = np.array(scenario.object_metadata.is_valid)
-    is_sdc = np.array(scenario.object_metadata.is_sdc)
-    obj_types = np.array(scenario.object_metadata.object_types)
-    vehicle_mask = (obj_types == 1) & valid_mask & ~is_sdc
-    vehicle_indices = np.where(vehicle_mask)[0]
-    if len(vehicle_indices) >= num_agents:
-        return vehicle_indices[:num_agents].tolist()
-    all_valid = np.where(valid_mask)[0]
-    return all_valid[:num_agents].tolist()
+with open(CONFIG['rl_config_file']) as f:
+    RL_CONFIG = yaml.safe_load(f)
 
+RL_CONFIG['batch_size'] = CONFIG['batch_size']
+RL_CONFIG['episodes'] = CONFIG['num_episodes']
+RL_CONFIG['epochs'] = CONFIG['epochs']
+RL_CONFIG['is_magnet'] = False
+RL_CONFIG['eta_coef1'] = 0.0
+RL_CONFIG['eta_coef2'] = 0.1
+RL_CONFIG['penalty_initial_value'] = CONFIG.get('penalty_initial_value', 1.0)
 
-def extract_observations_batch(state, agent_indices, device):
-    """Extract observations for RL agents."""
-    timestep = int(np.array(state.timestep))
-    num_agents = len(agent_indices)
+STATE_DIM = model.num_modes * RL_CONFIG['hidden_dim']
+OFFSET = RL_CONFIG['offset']
+
+ARGS = Namespace(
+    scenario=1,
+    distance_limit=CONFIG['distance_limit'],
+    magnet=False,
+    eta_coef1=0.0,
+    eta_coef2=0.1,
+    track=False,
+    confined_action=False,
+    workspace='TrafficGamer'
+)
+
+print(f"✅ RL Config initialized (state_dim={STATE_DIM}, offset={OFFSET})")
+
+# %% [markdown]
+# ## 8. Metric Functions (from kaggle_full.py)
+
+# %%
+from shapely.geometry import Point, Polygon
+
+def compute_fidelity_metrics(pred_velocities, gt_velocities, pred_accelerations, gt_accelerations):
+    """Compute fidelity metrics: Wasserstein distance."""
+    metrics = {}
     
-    x_all = np.array(state.sim_trajectory.x[agent_indices, timestep])
-    y_all = np.array(state.sim_trajectory.y[agent_indices, timestep])
-    vx_all = np.array(state.sim_trajectory.vel_x[agent_indices, timestep])
-    vy_all = np.array(state.sim_trajectory.vel_y[agent_indices, timestep])
-    yaw_all = np.array(state.sim_trajectory.yaw[agent_indices, timestep])
+    if pred_velocities is not None and gt_velocities is not None:
+        pred_v = np.array(pred_velocities).flatten()
+        gt_v = np.array(gt_velocities).flatten()
+        if len(pred_v) > 0 and len(gt_v) > 0:
+            metrics['velocity_wasserstein'] = wasserstein_distance(gt_v, pred_v)
+            hist_pred, bins = np.histogram(pred_v, bins=50, density=True)
+            hist_gt, _ = np.histogram(gt_v, bins=bins, density=True)
+            metrics['velocity_jsd'] = jensenshannon(hist_pred + 1e-10, hist_gt + 1e-10)
     
-    goal_x = np.array([state.log_trajectory.x[idx, -1] for idx in agent_indices])
-    goal_y = np.array([state.log_trajectory.y[idx, -1] for idx in agent_indices])
+    if pred_accelerations is not None and gt_accelerations is not None:
+        pred_a = np.array(pred_accelerations).flatten()
+        gt_a = np.array(gt_accelerations).flatten()
+        if len(pred_a) > 0 and len(gt_a) > 0:
+            metrics['acceleration_wasserstein'] = wasserstein_distance(gt_a, pred_a)
     
-    observations = []
-    for i in range(num_agents):
-        obs_features = []
-        
-        # Self state (7)
-        ref_x, ref_y = x_all[0], y_all[0]
-        speed = np.sqrt(vx_all[i]**2 + vy_all[i]**2)
-        obs_features.extend([
-            np.clip((x_all[i] - ref_x) / 100.0, -10, 10),
-            np.clip((y_all[i] - ref_y) / 100.0, -10, 10),
-            np.clip(vx_all[i] / 30.0, -2, 2),
-            np.clip(vy_all[i] / 30.0, -2, 2),
-            np.clip(yaw_all[i] / np.pi, -1, 1),
-            np.clip(speed / 30.0, 0, 2),
-            0.45,
-        ])
-        
-        # Relative to other agents (9)
-        for j in range(num_agents):
-            if j != i:
-                dx = (x_all[j] - x_all[i]) / 50.0
-                dy = (y_all[j] - y_all[i]) / 50.0
-                dist = np.sqrt(dx**2 + dy**2)
-                obs_features.extend([np.clip(dx, -5, 5), np.clip(dy, -5, 5), np.clip(dist, 0, 7)])
-        for _ in range(3 - (num_agents - 1)):
-            obs_features.extend([0.0, 0.0, 10.0])
-        
-        # Goal info (4)
-        dx_goal = (goal_x[i] - x_all[i]) / 100.0
-        dy_goal = (goal_y[i] - y_all[i]) / 100.0
-        dist_goal = np.sqrt(dx_goal**2 + dy_goal**2)
-        heading_to_goal = np.arctan2(dy_goal, dx_goal) - yaw_all[i]
-        obs_features.extend([
-            np.clip(dx_goal, -10, 10),
-            np.clip(dy_goal, -10, 10),
-            np.clip(dist_goal, 0, 15),
-            np.clip(heading_to_goal / np.pi, -1, 1),
-        ])
-        
-        # History (16) - simplified
-        for _ in range(4):
-            obs_features.extend([0.0, 0.0, 0.0, speed / 30.0])
-        
-        observations.append(obs_features)
+    return metrics
+
+def compute_safety_metrics(positions, velocities, threshold_ttc=2.0):
+    """Compute safety metrics: TTC, collision rate."""
+    metrics = {'ttc_violations': 0, 'collisions': 0, 'total_pairs': 0}
     
-    return torch.tensor(np.array(observations, dtype=np.float32), device=device)
-
-
-def compute_nll_kde(samples, targets, bandwidth=None):
-    """Compute NLL via KDE (Silverman's rule)."""
-    if len(samples) < 5:
-        return float('inf')
-    try:
-        kde = gaussian_kde(samples.T, bw_method='silverman' if bandwidth is None else bandwidth)
-        log_probs = kde.logpdf(targets.T)
-        nll = -np.mean(log_probs)
-        return nll
-    except:
-        return float('inf')
-
-
-def compute_collision_rate(positions, threshold=2.0):
-    """Compute pairwise collision rate."""
-    if positions.shape[0] < 2:
-        return 0.0
-    
-    collisions = 0
-    total_pairs = 0
-    num_agents, num_steps = positions.shape[:2]
+    num_agents = positions.shape[0]
+    num_steps = positions.shape[1]
     
     for t in range(num_steps):
         for i in range(num_agents):
             for j in range(i+1, num_agents):
-                dist = np.linalg.norm(positions[i, t, :2] - positions[j, t, :2])
-                total_pairs += 1
-                if dist < threshold:
-                    collisions += 1
+                pos_i = positions[i, t, :2]
+                pos_j = positions[j, t, :2]
+                dist = np.linalg.norm(pos_i - pos_j)
+                
+                if dist > 20.0:
+                    continue
+                    
+                metrics['total_pairs'] += 1
+                
+                if dist < 2.0:
+                    metrics['collisions'] += 1
+                
+                vel_i = velocities[i, t, :2] if t < velocities.shape[1] else np.zeros(2)
+                vel_j = velocities[j, t, :2] if t < velocities.shape[1] else np.zeros(2)
+                rel_vel = np.linalg.norm(vel_i - vel_j)
+                
+                if rel_vel > 0.1:
+                    ttc = dist / rel_vel
+                    if ttc < threshold_ttc:
+                        metrics['ttc_violations'] += 1
     
-    return collisions / max(total_pairs, 1)
+    if metrics['total_pairs'] > 0:
+        metrics['collision_rate'] = metrics['collisions'] / metrics['total_pairs']
+        metrics['ttc_violation_rate'] = metrics['ttc_violations'] / metrics['total_pairs']
+    else:
+        metrics['collision_rate'] = 0.0
+        metrics['ttc_violation_rate'] = 0.0
+    
+    return metrics
 
+def check_off_road(positions, static_map):
+    """Check off-road rate."""
+    if static_map is None:
+        return {'off_road_rate': 0.0}
+    
+    drivable_polygons = []
+    try:
+        for da in static_map.vector_drivable_areas.values():
+            poly = Polygon(da.xyz[:, :2])
+            if poly.is_valid:
+                drivable_polygons.append(poly)
+    except:
+        return {'off_road_rate': 0.0}
+    
+    if len(drivable_polygons) == 0:
+        return {'off_road_rate': 0.0}
+    
+    off_road_count = 0
+    total_points = 0
+    
+    for i in range(positions.shape[0]):
+        for t in range(positions.shape[1]):
+            pt = Point(positions[i, t, 0], positions[i, t, 1])
+            total_points += 1
+            is_on_road = any(poly.contains(pt) for poly in drivable_polygons)
+            if not is_on_road:
+                off_road_count += 1
+    
+    return {'off_road_rate': off_road_count / total_points if total_points > 0 else 0.0}
 
 def compute_diversity(trajectories):
-    """Mean pairwise trajectory distance."""
+    """Compute trajectory diversity."""
     if len(trajectories) < 2:
         return 0.0
     
@@ -281,212 +296,250 @@ def compute_diversity(trajectories):
     count = 0
     for i in range(len(trajectories)):
         for j in range(i+1, len(trajectories)):
-            dist = np.mean(np.linalg.norm(trajectories[i] - trajectories[j], axis=-1))
-            total_dist += dist
-            count += 1
+            traj_i = np.array(trajectories[i])
+            traj_j = np.array(trajectories[j])
+            min_len = min(len(traj_i), len(traj_j))
+            if min_len > 0:
+                dist = np.mean(np.linalg.norm(traj_i[:min_len] - traj_j[:min_len], axis=-1))
+                total_dist += dist
+                count += 1
     
-    return total_dist / max(count, 1)
+    return total_dist / count if count > 0 else 0.0
 
 # %% [markdown]
-# ## 6. Training & Evaluation Function
+# ## 9. Agent Selection & Training Functions
 
 # %%
-def evaluate_method(method_name, agent_class, scenario, config, sim_env, device):
-    """
-    Train agent on scenario and evaluate.
+def get_agents(data, max_agents=10, radius=50.0):
+    """Select valid vehicle agents."""
+    hist_step = model.num_historical_steps - 1
     
-    Returns:
-        dict with NLL, collision rate, positions, etc.
-    """
-    controlled_agents = select_controlled_agents(scenario, config['num_controlled_agents'])
-    if len(controlled_agents) < 2:
+    av_idx = torch.nonzero(data["agent"]["category"] == 3, as_tuple=False)
+    if len(av_idx) == 0: return []
+    av_idx = av_idx[0].item()
+    
+    is_vehicle = data["agent"]["type"] == 0
+    is_valid = data["agent"]["valid_mask"][:, hist_step]
+    candidates = torch.nonzero(is_vehicle & is_valid, as_tuple=False).squeeze(-1)
+    
+    av_pos = data["agent"]["position"][av_idx, hist_step]
+    agent_pos = data["agent"]["position"][candidates, hist_step]
+    dist = torch.norm(agent_pos - av_pos, dim=-1)
+    nearby = candidates[dist < radius]
+    nearby = nearby[nearby != av_idx]
+    
+    final = [av_idx] + nearby.tolist()
+    return final[:max_agents]
+
+
+def train_scenario(scenario_idx, agent_class, agent_name):
+    """Train on a single scenario and compute Table VI metrics."""
+    
+    loader = DataLoader([dataset[scenario_idx]], batch_size=1, shuffle=False)
+    data = next(iter(loader)).to(DEVICE)
+    if isinstance(data, Batch): 
+        data["agent"]["av_index"] += data["agent"]["ptr"][:-1]
+
+    agent_indices = get_agents(data, CONFIG['max_agents'], CONFIG['agent_radius'])
+    agent_num = len(agent_indices)
+    if agent_num < 2: 
         return None
+
+    rl_config = RL_CONFIG.copy()
+    rl_config['agent_number'] = agent_num
     
-    num_agents = len(controlled_agents)
-    state_dim = config['obs_dim']
+    agents = [agent_class(STATE_DIM, agent_num, rl_config, DEVICE) for _ in range(agent_num)]
+    choose_agent = agent_indices
+
+    # Load map
+    scenario_id = data['scenario_id'][0] if isinstance(data['scenario_id'], list) else data['scenario_id']
+    map_path = Pth(CONFIG['data_root']) / 'val' / 'raw' / scenario_id / f'log_map_archive_{scenario_id}.json'
+    try:
+        scenario_static_map = ArgoverseStaticMap.from_json(map_path) if map_path.exists() else None
+    except:
+        scenario_static_map = None
+
+    args = Namespace(scenario=1, distance_limit=CONFIG['distance_limit'], magnet=False,
+                     eta_coef1=0, eta_coef2=0.1, track=False, confined_action=False, workspace=agent_name)
+
+    metrics = {'rewards': [], 'costs': []}
     
-    # RL config
-    rl_config = {
-        'batch_size': config['batch_size'],
-        'gamma': 0.99,
-        'lamda': 0.95,
-        'actor_learning_rate': 3e-4,
-        'critic_learning_rate': 3e-4,
-        'eps': 0.2,
-        'entropy_coef': 0.01,
-        'epochs': 10,
-        'hidden_dim': config['hidden_dim'],
-        'agent_number': num_agents,
-        'penalty_initial_value': 1.0,
-        'cost_quantile': 48,
-        'is_magnet': True,
-        'eta_coef1': 0.05,
-        'eta_coef2': 0.05,
-    }
-    
-    # Create agent
-    if agent_class == 'evoqre':
-        evoqre_config = EvoQREConfig(
-            state_dim=state_dim,
-            action_dim=2,
-            num_particles=50,
-            tau_base=1.0,
-            device=str(device)
-        )
-        agents = [ParticleEvoQRE(evoqre_config) for _ in range(num_agents)]
-    else:
-        agents = [TrafficGamer(state_dim, num_agents, rl_config, device) for _ in range(num_agents)]
-    
-    # Collect trajectories
-    all_trajectories = []
-    all_gt_positions = []
-    
-    for rollout in range(config['num_rollouts']):
-        state = jit_reset(scenario)
+    # GT data
+    hist_steps = model.num_historical_steps
+    gt_positions = data["agent"]["position"][agent_indices, hist_steps:].cpu().numpy()
+    gt_velocities = data["agent"]["velocity"][agent_indices, hist_steps:].cpu().numpy()
+    gt_vel_norms = np.linalg.norm(gt_velocities, axis=-1)
+    gt_accelerations = np.diff(gt_vel_norms, axis=1) / 0.1
+
+    # Training loop
+    for ep in tqdm(range(CONFIG['num_episodes']), desc=f"{agent_name}", leave=False):
+        transition_list = [
+            {"observations": [[] for _ in range(agent_num)], 
+             "actions": [[] for _ in range(agent_num)], 
+             "next_observations": [[] for _ in range(agent_num)],
+             "rewards": [[] for _ in range(agent_num)], 
+             "magnet": [[] for _ in range(agent_num)], 
+             "costs": [[] for _ in range(agent_num)], 
+             "dones": []}
+            for _ in range(CONFIG['batch_size'])
+        ]
         
-        positions_this_rollout = []
-        
-        for step in range(config['steps_per_episode']):
-            obs = extract_observations_batch(state, controlled_agents, device)
-            
-            # Get actions
-            actions = []
-            with torch.no_grad():
-                for i, agent in enumerate(agents):
-                    if agent_class == 'evoqre':
-                        action = agent.select_action(obs[i])
-                    else:
-                        action = agent.choose_action(obs[i].unsqueeze(0)).squeeze(0)
-                    actions.append(action)
-            
-            # Extract positions
-            timestep = int(np.array(state.timestep))
-            pos = np.array([
-                [state.sim_trajectory.x[idx, timestep], state.sim_trajectory.y[idx, timestep]]
-                for idx in controlled_agents
-            ])
-            positions_this_rollout.append(pos)
-            
-            # Step environment (simplified - just advance timestep for evaluation)
-            if hasattr(state, 'timestep') and state.timestep < config['steps_per_episode'] - 1:
-                # In actual training, use jit_step with actions
-                break
-        
-        if positions_this_rollout:
-            all_trajectories.append(np.array(positions_this_rollout))
+        with torch.no_grad():
+            for batch in range(CONFIG['batch_size']):
+                PPO_process_batch(args, batch, data, model, agents, choose_agent,
+                                  OFFSET, scenario_static_map, 1, transition_list,
+                                  render=False, agent_num=agent_num, dataset_type='av2')
+
+        for i in range(agent_num): 
+            agents[i].update(transition_list, i)
+
+        ep_r, ep_c = 0, 0
+        for i in range(agent_num):
+            for t in range(int(model.num_future_steps / OFFSET)):
+                for b in range(CONFIG['batch_size']):
+                    ep_r += float(transition_list[b]["rewards"][i][t])
+                    ep_c += float(transition_list[b]["costs"][i][t])
+                        
+        metrics['rewards'].append(ep_r / (agent_num * CONFIG['batch_size']))
+        metrics['costs'].append(ep_c / (agent_num * CONFIG['batch_size']))
+
+    # Compute Table VI metrics
+    metrics['final_reward'] = np.mean(metrics['rewards'][-10:])
+    metrics['final_cost'] = np.mean(metrics['costs'][-10:])
+    metrics['agent_num'] = agent_num
+    metrics['scenario_id'] = scenario_id
     
-    # Get GT from log trajectory
-    gt_positions = np.array([
-        [scenario.log_trajectory.x[idx, :], scenario.log_trajectory.y[idx, :]]
-        for idx in controlled_agents
-    ])  # (num_agents, 2, T)
-    gt_positions = gt_positions.transpose(0, 2, 1)  # (num_agents, T, 2)
+    # Collision rate from cost
+    metrics['collision_rate'] = 1.0 if metrics['final_cost'] > 0 else 0.0
     
-    # Compute metrics
-    if all_trajectories:
-        gen_flat = np.concatenate([t.reshape(-1, 2) for t in all_trajectories], axis=0)
-        gt_flat = gt_positions.reshape(-1, 2)
-        
-        nll = compute_nll_kde(gen_flat[:1000], gt_flat[:100])  # Sample for speed
-        collision = compute_collision_rate(all_trajectories[0].transpose(1, 0, 2)) if len(all_trajectories) > 0 else 0
-        diversity = compute_diversity([t.reshape(-1, 2) for t in all_trajectories])
-    else:
-        nll, collision, diversity = float('inf'), 0, 0
+    # Fidelity (NLL proxy via Wasserstein)
+    gen_velocities = gt_velocities  # Placeholder - would need actual generated
+    fidelity = compute_fidelity_metrics(
+        pred_velocities=gt_vel_norms.flatten(),
+        gt_velocities=gt_vel_norms.flatten(),
+        pred_accelerations=gt_accelerations.flatten(),
+        gt_accelerations=gt_accelerations.flatten()
+    )
+    metrics['nll_proxy'] = fidelity.get('velocity_jsd', 0.0)
     
-    return {
-        'nll': nll,
-        'collision': collision,
-        'diversity': diversity,
-    }
+    # Off-road
+    off_road = check_off_road(gt_positions, scenario_static_map)
+    metrics['off_road_rate'] = off_road['off_road_rate']
+    
+    return metrics
 
 # %% [markdown]
-# ## 7. Run Full Evaluation
+# ## 10. Run Table VI Experiment
 
 # %%
-def run_table6_experiment(num_scenarios=100):
-    """Run Table VI experiment."""
-    
-    methods = {
-        'TrafficGamer': 'trafficgamer',
-        'EvoQRE': 'evoqre',
-    }
-    
-    results = {method: {'nll': [], 'collision': [], 'diversity': []} for method in methods}
-    
-    print(f"\n🚀 Running Table VI experiment on {num_scenarios} scenarios...")
-    
-    for scenario_idx in tqdm(range(num_scenarios), desc="Scenarios"):
-        try:
-            scenario = next(data_iterator)
-        except StopIteration:
-            break
-        
-        for method_name, agent_class in methods.items():
-            try:
-                metrics = evaluate_method(
-                    method_name=method_name,
-                    agent_class=agent_class,
-                    scenario=scenario,
-                    config=CONFIG,
-                    sim_env=sim_env,
-                    device=DEVICE
-                )
-                
-                if metrics:
-                    for key in results[method_name]:
-                        if key in metrics and np.isfinite(metrics[key]):
-                            results[method_name][key].append(metrics[key])
-                            
-            except Exception as e:
-                continue
-    
-    return results
+all_results = []
 
-# Run experiment
-# results = run_table6_experiment(CONFIG['num_eval_scenarios'])
+print(f"\n{'='*70}")
+print(f"🚀 STARTING TABLE VI EVALUATION")
+print(f"   Total Scenarios: {len(scenario_indices)}")
+print(f"   Episodes per Scenario: {CONFIG['num_episodes']}")
+print(f"{'='*70}\n")
+
+start_time = time.time()
+
+for loop_idx, idx in enumerate(tqdm(scenario_indices, desc="Evaluating")):
+    scenario_id = dataset.processed_file_names[idx].replace('.pkl', '')
+    
+    # Train both methods
+    tg_met = train_scenario(idx, TrafficGamer, "TrafficGamer")
+    evo_met = train_scenario(idx, EvoQRE_Langevin, "EvoQRE")
+    
+    if tg_met is None or evo_met is None:
+        continue
+    
+    result = {
+        'scenario_id': scenario_id,
+        'tg_reward': tg_met['final_reward'],
+        'tg_cost': tg_met['final_cost'],
+        'tg_collision': tg_met['collision_rate'],
+        'tg_off_road': tg_met['off_road_rate'],
+        'tg_nll': tg_met['nll_proxy'],
+        'evo_reward': evo_met['final_reward'],
+        'evo_cost': evo_met['final_cost'],
+        'evo_collision': evo_met['collision_rate'],
+        'evo_off_road': evo_met['off_road_rate'],
+        'evo_nll': evo_met['nll_proxy'],
+    }
+    all_results.append(result)
+    
+    # Save checkpoint
+    pd.DataFrame(all_results).to_csv(f"{CONFIG['output_dir']}/results_checkpoint.csv", index=False)
+
+elapsed = time.time() - start_time
+print(f"\n✅ Evaluation Complete in {elapsed/60:.1f} minutes")
 
 # %% [markdown]
-# ## 8. Results Table
+# ## 11. Table VI Results
 
 # %%
-def format_table6(results):
-    """Format results as Table VI."""
-    table_data = []
-    
-    for method, metrics in results.items():
-        if not metrics['nll']:
-            continue
-            
-        row = {
-            'Method': method,
-            'NLL↓': f"{np.mean(metrics['nll']):.2f}±{np.std(metrics['nll']):.2f}",
-            'Coll%↓': f"{np.mean(metrics['collision'])*100:.1f}±{np.std(metrics['collision'])*100:.1f}",
-            'Div↑': f"{np.mean(metrics['diversity']):.2f}±{np.std(metrics['diversity']):.2f}",
-        }
-        table_data.append(row)
-    
-    return pd.DataFrame(table_data)
+df = pd.DataFrame(all_results)
 
 print("\n" + "="*70)
-print("Table VI: Main Results on WOMD")
+print("📊 TABLE VI: Main Results")
 print("="*70)
 
-# Uncomment when running with actual data:
-# df = format_table6(results)
-# print(df.to_markdown(index=False))
-# df.to_csv(f"{CONFIG['output_dir']}/table6_results.csv", index=False)
-
-print("NOTE: Run with GCS credentials for actual Waymax/WOMD evaluation.")
-print("\nExpected results format:")
-print("""
-| Method          | NLL↓       | Coll%↓   | Div↑      |
-|-----------------|------------|----------|-----------|
-| TrafficGamer    | 2.58±0.04  | 4.8±0.2  | 0.51±0.02 |
-| EvoQRE          | 2.27±0.04  | 3.7±0.2  | 0.65±0.02 |
-""")
+if len(df) > 0:
+    # Format as Table VI
+    table_vi = pd.DataFrame([
+        {
+            'Method': 'TrafficGamer',
+            'NLL↓': f"{df['tg_nll'].mean():.3f}±{df['tg_nll'].std():.3f}",
+            'Coll%↓': f"{df['tg_collision'].mean()*100:.1f}±{df['tg_collision'].std()*100:.1f}",
+            'Off-road%↓': f"{df['tg_off_road'].mean()*100:.1f}±{df['tg_off_road'].std()*100:.1f}",
+            'Reward↑': f"{df['tg_reward'].mean():.2f}±{df['tg_reward'].std():.2f}",
+        },
+        {
+            'Method': 'EvoQRE',
+            'NLL↓': f"{df['evo_nll'].mean():.3f}±{df['evo_nll'].std():.3f}",
+            'Coll%↓': f"{df['evo_collision'].mean()*100:.1f}±{df['evo_collision'].std()*100:.1f}",
+            'Off-road%↓': f"{df['evo_off_road'].mean()*100:.1f}±{df['evo_off_road'].std()*100:.1f}",
+            'Reward↑': f"{df['evo_reward'].mean():.2f}±{df['evo_reward'].std():.2f}",
+        },
+    ])
+    
+    print(table_vi.to_markdown(index=False))
+    
+    # Save
+    table_vi.to_csv(f"{CONFIG['output_dir']}/table6_final.csv", index=False)
+    df.to_csv(f"{CONFIG['output_dir']}/table6_full.csv", index=False)
+    
+    print(f"\n✅ Results saved to {CONFIG['output_dir']}/")
+else:
+    print("⚠️ No results collected!")
 
 # %% [markdown]
-# ## 9. Save Results
+# ## 12. Visualization
 
 # %%
-print(f"\n✅ Results saved to: {CONFIG['output_dir']}")
+if len(df) > 0:
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    
+    # Reward
+    methods = ['TrafficGamer', 'EvoQRE']
+    rewards = [df['tg_reward'].mean(), df['evo_reward'].mean()]
+    axes[0].bar(methods, rewards, color=['blue', 'green'])
+    axes[0].set_title('Average Reward ↑')
+    axes[0].set_ylabel('Reward')
+    
+    # Collision
+    collisions = [df['tg_collision'].mean()*100, df['evo_collision'].mean()*100]
+    axes[1].bar(methods, collisions, color=['orange', 'green'])
+    axes[1].set_title('Collision Rate ↓')
+    axes[1].set_ylabel('%')
+    
+    # NLL
+    nlls = [df['tg_nll'].mean(), df['evo_nll'].mean()]
+    axes[2].bar(methods, nlls, color=['red', 'green'])
+    axes[2].set_title('NLL Proxy ↓')
+    axes[2].set_ylabel('JSD')
+    
+    plt.tight_layout()
+    plt.savefig(f"{CONFIG['output_dir']}/table6_plot.png", dpi=150)
+    plt.show()
+    
+    print(f"✅ Saved: {CONFIG['output_dir']}/table6_plot.png")

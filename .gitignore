@@ -110,6 +110,7 @@ venv.bak/
 
 # Notebooks (Kaggle development)
 notebooks/
+latex/
 
 # seed project
 lightning_logs/

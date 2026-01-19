@@ -14,8 +14,14 @@
 from typing import Optional, Tuple
 
 import torch
-from torch_scatter import gather_csr
-from torch_scatter import segment_csr
+try:
+    from torch_scatter import gather_csr
+except ImportError:
+    gather_csr = None
+try:
+    from torch_scatter import segment_csr
+except ImportError:
+    segment_csr = None
 
 
 def topk(

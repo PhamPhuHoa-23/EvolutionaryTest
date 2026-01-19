@@ -95,7 +95,9 @@ class Policy(nn.Module):
         
         mean = result[..., :2]
         b = result[..., 2:]
-        b = F.elu_(b, alpha=1.0) + 1.1  # Ensure positive scale for Laplace
+        # Use non-in-place ELU (elu_ can corrupt autograd) and clamp for numerical stability
+        b = F.elu(b, alpha=1.0) + 1.1  # Ensure positive scale for Laplace
+        b = torch.clamp(b, min=1e-6, max=100.0)  # Prevent NaN in Laplace distribution
         return mean, b
 
 

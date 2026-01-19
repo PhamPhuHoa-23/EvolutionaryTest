@@ -16,7 +16,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_scatter import segment_csr
+try:
+    from torch_scatter import segment_csr
+except ImportError:
+    segment_csr = None
 
 from losses.laplace_nll_loss import LaplaceNLLLoss
 
