@@ -402,6 +402,18 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
     # ===========================================
     # Compute Metrics
     # ===========================================
+    # NOTE: Current implementation uses GT trajectories for metrics.
+    # For accurate metrics, should collect GENERATED trajectories from 
+    # PPO_process_batch rollouts. See kaggle_full.py train_scenario()
+    # for the proper implementation with trajectory reconstruction.
+    #
+    # METRIC DEFINITIONS (from paper):
+    # - NLL: KDE-based log-likelihood of generated vs GT velocity distribution
+    # - Collision%: % timesteps with any agent pair < 2m distance
+    # - Off-road%: % positions outside drivable area polygons
+    # - Diversity: Mean pairwise trajectory distance across K rollouts
+    # ===========================================
+    
     hist_steps = model.num_historical_steps
     
     # Ground truth trajectories
@@ -409,14 +421,15 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
     gt_velocities = data["agent"]["velocity"][agent_indices, hist_steps:].cpu().numpy()
     gt_headings = data["agent"]["heading"][agent_indices, hist_steps:].cpu().numpy()
     
-    # NLL (using velocity distribution)
-    gen_velocities = gt_velocities  # In full impl, use generated trajectories
+    # NLL: GT self-comparison (will be ~0, placeholder until generated trajs implemented)
+    # TODO: Replace with generated velocities from rollout
+    gen_velocities = gt_velocities
     nll = metrics_computer.compute_nll_kde(
         gen_velocities.flatten(),
         gt_velocities.flatten()
     )
     
-    # Collision rate
+    # Collision rate (on GT positions)
     collision_rate = metrics_computer.compute_collision_rate(gt_positions)
     
     # Off-road rate (extract polygons from static_map)
@@ -426,7 +439,8 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
     else:
         off_road_rate = 0.0
     
-    # Diversity
+    # Diversity: Currently computes mean pairwise distance between agents
+    # TODO: Should be variance across K rollouts for same scenario
     diversity = metrics_computer.compute_diversity(gt_positions)
     
     # Behavioral metrics
@@ -498,11 +512,17 @@ for idx in tqdm(scenario_indices, desc="Scenarios"):
                 all_results[method_name].append(result)
                 RESULTS.add_result(result)
         except Exception as e:
-            print(f"Error {method_name} on {idx}: {e}")
+            import traceback
+            print(f"\n{'='*60}")
+            print(f"❌ Error {method_name} on scenario {idx}")
+            print(f"{'='*60}")
+            traceback.print_exc()
+            print(f"{'='*60}\n")
             continue
     
     # Save checkpoint every 10 scenarios
-    if (len(all_results['TrafficGamer']) + 1) % 10 == 0:
+    first_method = list(METHODS.keys())[0]
+    if first_method in all_results and (len(all_results[first_method]) + 1) % 10 == 0:
         saver = ResultsSaver(CONFIG.output_dir)
         saver.save_experiment(RESULTS, save_trajectories=False)
 

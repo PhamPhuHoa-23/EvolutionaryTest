@@ -519,12 +519,10 @@ class EvoQRE_Langevin(TrafficGamer):
                 
                 # Projection
                 action = torch.clamp(action, -self.action_bound, self.action_bound)
-        # Ensure action has at least 1 dimension
-        if action.shape[0] == 1:
-            action = action.squeeze(0)
-        # Ensure we always return at least 1D tensor
-        if action.dim() == 0:
-            action = action.unsqueeze(0)
+        
+        # DON'T squeeze batch dim - rollout.py line 154 does [0] to get batch item
+        # Should return (batch, action_dim) e.g. (1, 2)
+        # After rollout does [0], it becomes (2,) which is correct
         return action
     
     def get_action_dist(self, state: torch.Tensor):
