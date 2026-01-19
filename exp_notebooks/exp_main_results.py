@@ -15,7 +15,18 @@
 # ## 1. Install Dependencies
 
 # %%
-!pip install -q torch torchvision torchaudio pytorch-lightning==2.0.0 torch-geometric av av2 scipy pandas shapely
+!pip install -q torch torchvision torchaudio
+!pip install -q pytorch-lightning==2.0.0
+!pip install -q torch-geometric
+!pip install -q av av2 neptune scipy pandas shapely
+
+# %%
+import torch
+print(f"PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    cuda_ver = torch.version.cuda.replace('.', '')[:3]
+    !pip install torch-scatter torch-sparse torch-cluster -f https://data.pyg.org/whl/torch-{torch.__version__.split('+')[0]}+cu{cuda_ver}.html
 
 # %% [markdown]
 # ## 2. Setup
@@ -137,11 +148,53 @@ print(f"✅ Dataset: {len(dataset)} scenarios")
 # Sample scenarios
 import random
 random.seed(CONFIG.seed)
-scenario_indices = random.sample(
+candidate_indices = random.sample(
     range(len(dataset)), 
-    min(CONFIG.num_scenarios, len(dataset))
+    min(CONFIG.num_scenarios * 2, len(dataset))  # Sample 2x to account for filtering
 )
-print(f"📊 Will evaluate {len(scenario_indices)} scenarios")
+
+# %% [markdown]
+# ## 4.1 Pre-load Maps (Optimization)
+# 
+# Pre-load all maps at startup to avoid repeated disk I/O during training.
+
+# %%
+print("📦 Pre-loading scenario maps (one-time)...")
+
+# Build scenario_id lookup
+def get_scenario_id_from_idx(idx):
+    """Get scenario ID from dataset index."""
+    fname = dataset.processed_file_names[idx]
+    return fname.replace('.pkl', '').split('/')[-1].split('\\')[-1]
+
+# Pre-cache maps
+MAP_CACHE = {}
+valid_scenario_indices = []
+
+for idx in tqdm(candidate_indices, desc="Caching maps"):
+    try:
+        scenario_id = get_scenario_id_from_idx(idx)
+        
+        # Check if already cached
+        if scenario_id in MAP_CACHE:
+            valid_scenario_indices.append(idx)
+            continue
+        
+        # Try to load map
+        map_path = Path(DATA_ROOT) / 'val' / 'raw' / scenario_id / f'log_map_archive_{scenario_id}.json'
+        
+        if map_path.exists():
+            MAP_CACHE[scenario_id] = ArgoverseStaticMap.from_json(map_path)
+            valid_scenario_indices.append(idx)
+        # Skip rglob - too slow, just skip if not found
+    except Exception as e:
+        continue
+
+# Take only requested number of scenarios
+scenario_indices = valid_scenario_indices[:CONFIG.num_scenarios]
+
+print(f"✅ Cached {len(MAP_CACHE)} maps")
+print(f"📊 Will evaluate {len(scenario_indices)} valid scenarios")
 
 # %% [markdown]
 # ## 5. Load RL Config
@@ -150,11 +203,41 @@ print(f"📊 Will evaluate {len(scenario_indices)} scenarios")
 with open('configs/TrafficGamer.yaml') as f:
     RL_CONFIG = yaml.safe_load(f)
 
+# Add ALL required defaults (from kaggle.py pattern)
+RL_CONFIG.setdefault('hidden_dim', 128)
+RL_CONFIG.setdefault('gamma', 0.99)
+RL_CONFIG.setdefault('lamda', 0.95)
+RL_CONFIG.setdefault('actor_learning_rate', 5e-5)
+RL_CONFIG.setdefault('critic_learning_rate', 1e-4)
+RL_CONFIG.setdefault('constrainted_critic_learning_rate', 1e-4)
+RL_CONFIG.setdefault('density_learning_rate', 3e-4)
+RL_CONFIG.setdefault('eps', 0.2)
+RL_CONFIG.setdefault('offset', 5)
+RL_CONFIG.setdefault('entropy_coef', 0.005)
+RL_CONFIG.setdefault('epochs', 10)
+RL_CONFIG.setdefault('gae', True)
+RL_CONFIG.setdefault('target_kl', 0.01)
+RL_CONFIG.setdefault('beta_coef', 0.1)
+RL_CONFIG.setdefault('N_quantile', 64)
+RL_CONFIG.setdefault('tau_update', 0.01)
+RL_CONFIG.setdefault('LR_QN', 3e-4)
+RL_CONFIG.setdefault('type', 'CVaR')
+RL_CONFIG.setdefault('method', 'SplineDQN')
+RL_CONFIG.setdefault('penalty_initial_value', 1.0)
+RL_CONFIG.setdefault('cost_quantile', 48)
+
+# CRITICAL: These must be set
+RL_CONFIG['is_magnet'] = False
+RL_CONFIG['eta_coef1'] = 0.0
+RL_CONFIG['eta_coef2'] = 0.1
 RL_CONFIG['batch_size'] = CONFIG.batch_size
 RL_CONFIG['episodes'] = CONFIG.num_episodes
-RL_CONFIG['epochs'] = CONFIG.epochs
 
-# EvoQRE specific
+# EvoQRE/Langevin specific
+RL_CONFIG.setdefault('langevin_steps', 20)
+RL_CONFIG.setdefault('langevin_step_size', 0.05)
+RL_CONFIG.setdefault('tau', 0.5)
+RL_CONFIG.setdefault('action_bound', 1.0)
 RL_CONFIG['langevin_steps'] = CONFIG.langevin_steps
 RL_CONFIG['langevin_step_size'] = CONFIG.step_size
 RL_CONFIG['tau'] = CONFIG.tau
@@ -163,7 +246,8 @@ RL_CONFIG['epsilon'] = CONFIG.epsilon
 STATE_DIM = model.num_modes * RL_CONFIG['hidden_dim']
 OFFSET = RL_CONFIG['offset']
 
-print(f"✅ RL Config: state_dim={STATE_DIM}, offset={OFFSET}")
+print(f"✅ RL Config loaded")
+print(f"   state_dim={STATE_DIM}, offset={OFFSET}, is_magnet={RL_CONFIG['is_magnet']}")
 
 # %% [markdown]
 # ## 6. Helper Functions
@@ -195,22 +279,38 @@ def get_agents(data, max_agents=10, radius=50.0):
     return ([av_idx] + nearby.tolist())[:max_agents]
 
 
-def load_drivable_polygons(scenario_id, data_root):
-    """Load drivable area polygons from map."""
+def load_static_map(scenario_id, data_root):
+    """Load ArgoverseStaticMap for a scenario (matches kaggle_full.py pattern)."""
     map_path = Path(data_root) / 'val' / 'raw' / scenario_id / f'log_map_archive_{scenario_id}.json'
     
     if not map_path.exists():
+        # Try to find it with rglob
+        found = list(Path(data_root).rglob(f'log_map_archive_{scenario_id}.json'))
+        if found:
+            map_path = found[0]
+        else:
+            return None
+    
+    try:
+        return ArgoverseStaticMap.from_json(map_path)
+    except Exception as e:
+        print(f"Warning: Could not load map for {scenario_id}: {e}")
+        return None
+
+
+def get_drivable_polygons(static_map):
+    """Extract drivable area polygons from ArgoverseStaticMap."""
+    if static_map is None:
         return []
     
     try:
-        static_map = ArgoverseStaticMap.from_json(map_path)
         polygons = []
         for da in static_map.vector_drivable_areas.values():
             poly = Polygon(da.xyz[:, :2])
             if poly.is_valid:
                 polygons.append(poly)
         return polygons
-    except:
+    except Exception:
         return []
 
 # %% [markdown]
@@ -247,8 +347,10 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
     rl_config['agent_number'] = agent_num
     agents = [agent_class(STATE_DIM, agent_num, rl_config, DEVICE) for _ in range(agent_num)]
 
-    # Load map for off-road computation
-    drivable_polygons = load_drivable_polygons(scenario_id, DATA_ROOT)
+    # Get map from pre-loaded cache (FAST - no disk I/O)
+    scenario_static_map = MAP_CACHE.get(scenario_id)
+    if scenario_static_map is None:
+        return None  # Skip scenarios without cached map
 
     # Args for rollout
     args = Namespace(
@@ -278,7 +380,7 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
             for batch in range(CONFIG.batch_size):
                 PPO_process_batch(
                     args, batch, data, model, agents, agent_indices,
-                    OFFSET, None, 1, transition_list,
+                    OFFSET, scenario_static_map, 1, transition_list,
                     render=False, agent_num=agent_num, dataset_type='av2'
                 )
 
@@ -317,7 +419,8 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
     # Collision rate
     collision_rate = metrics_computer.compute_collision_rate(gt_positions)
     
-    # Off-road rate
+    # Off-road rate (extract polygons from static_map)
+    drivable_polygons = get_drivable_polygons(scenario_static_map)
     if drivable_polygons:
         off_road_rate = metrics_computer.compute_off_road_rate(gt_positions, drivable_polygons)
     else:

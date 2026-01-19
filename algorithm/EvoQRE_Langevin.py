@@ -519,8 +519,13 @@ class EvoQRE_Langevin(TrafficGamer):
                 
                 # Projection
                 action = torch.clamp(action, -self.action_bound, self.action_bound)
-        
-        return action.squeeze(0) if action.shape[0] == 1 else action
+        # Ensure action has at least 1 dimension
+        if action.shape[0] == 1:
+            action = action.squeeze(0)
+        # Ensure we always return at least 1D tensor
+        if action.dim() == 0:
+            action = action.unsqueeze(0)
+        return action
     
     def get_action_dist(self, state: torch.Tensor):
         """
@@ -567,11 +572,32 @@ class EvoQRE_Langevin(TrafficGamer):
         if len(states) == 0:
             return
         
-        # Convert to tensors
-        states = torch.stack(states).to(self.device)
-        actions = torch.stack(actions).to(self.device)
-        rewards = torch.stack(rewards).to(self.device).squeeze(-1)
-        next_states = torch.stack(next_states).to(self.device)
+        # Convert to tensors - handle potential 0-dim tensors
+        def ensure_2d(tensor_list):
+            result = []
+            for t in tensor_list:
+                if t.dim() == 0:
+                    t = t.unsqueeze(0)
+                if t.dim() == 1:
+                    t = t.unsqueeze(0)
+                result.append(t)
+            return torch.cat(result, dim=0)
+        
+        # Stack states (these are already 1D per agent)
+        states_list = [s.flatten() if s.dim() > 1 else s for s in states]
+        states = torch.stack(states_list).to(self.device)
+        
+        # Handle actions - may be 0-dim or 1-dim
+        actions_list = [a if a.dim() >= 1 else a.unsqueeze(0) for a in actions]
+        actions = torch.stack(actions_list).to(self.device)
+        
+        # Handle rewards - may be scalar tensors
+        rewards_list = [r.flatten() if r.dim() > 0 else r.unsqueeze(0) for r in rewards]
+        rewards = torch.cat(rewards_list).to(self.device)
+        
+        next_states_list = [s.flatten() if s.dim() > 1 else s for s in next_states]
+        next_states = torch.stack(next_states_list).to(self.device)
+        
         dones = torch.tensor(dones, dtype=torch.float32, device=self.device)
         
         # Compute target Q-values

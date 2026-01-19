@@ -353,34 +353,38 @@ def reward_function(data, new_data, model, agent_index, scenario_static_map, dat
     
     flag = 0
     if dataset_type=='av2':
-        boundary_coords = []
-        for i in scenario_static_map.get_nearby_lane_segments(new_data["agent"]["position"][
-                        agent_index,
-                        model.num_historical_steps - 1 : model.num_historical_steps,
-                        : model.output_dim,
-                    ].cpu().numpy(),3):
-            for j in scenario_static_map.get_lane_segment_polygon(i.id):
-                    boundary_coords.append([j[0], j[1]])
-            max_speed_limit_ms = 15
-    
-            current_velocity = new_data["agent"]["velocity"][
-                agent_index,
-                model.num_historical_steps - 1,
-                : model.output_dim
-            ].cpu().numpy()
-            current_speed = np.linalg.norm(current_velocity)
+        # Skip lane segment checks if map is not available
+        if scenario_static_map is None:
+            flag = 1  # Assume on-road if no map
+        else:
+            boundary_coords = []
+            for i in scenario_static_map.get_nearby_lane_segments(new_data["agent"]["position"][
+                            agent_index,
+                            model.num_historical_steps - 1 : model.num_historical_steps,
+                            : model.output_dim,
+                        ].cpu().numpy(),3):
+                for j in scenario_static_map.get_lane_segment_polygon(i.id):
+                        boundary_coords.append([j[0], j[1]])
+                max_speed_limit_ms = 15
+        
+                current_velocity = new_data["agent"]["velocity"][
+                    agent_index,
+                    model.num_historical_steps - 1,
+                    : model.output_dim
+                ].cpu().numpy()
+                current_speed = np.linalg.norm(current_velocity)
 
-            if current_speed > max_speed_limit_ms:
-                reward4 -= (current_speed - max_speed_limit_ms) * 0.5 
-            polygon = Polygon(boundary_coords)
-            
-            if polygon.contains(Point(new_data["agent"]["position"][
-                        agent_index,
-                        model.num_historical_steps - 1 : model.num_historical_steps,
-                        : model.output_dim,
-                    ].cpu().numpy())):
-                flag = 1
-                break
+                if current_speed > max_speed_limit_ms:
+                    reward4 -= (current_speed - max_speed_limit_ms) * 0.5 
+                polygon = Polygon(boundary_coords)
+                
+                if polygon.contains(Point(new_data["agent"]["position"][
+                            agent_index,
+                            model.num_historical_steps - 1 : model.num_historical_steps,
+                            : model.output_dim,
+                        ].cpu().numpy())):
+                    flag = 1
+                    break
     elif dataset_type=='waymo':
         line_id = -1
         center_line = None
