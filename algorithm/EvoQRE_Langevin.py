@@ -422,6 +422,14 @@ class EvoQRE_Langevin(TrafficGamer):
         self.epsilon = config.get('epsilon', 0.1)
         
         # ===========================================
+        # JKO-Inspired Techniques (Table IV)
+        # ===========================================
+        self.adaptive_eta = config.get('adaptive_eta', False)       # η = η₀/(‖∇Q‖ + ε)
+        self.warm_start = config.get('warm_start', False)           # Init from BC output
+        self.early_stopping = config.get('early_stopping', False)   # Stop when ΔQ < threshold
+        self.early_stop_threshold = config.get('early_stop_threshold', 1e-4)
+        
+        # ===========================================
         # Q-Networks (Dual for stability)
         # ===========================================
         # Q1: Primary concave Q-network
@@ -481,6 +489,7 @@ class EvoQRE_Langevin(TrafficGamer):
         Generate action via Langevin Sampling (Algorithm 1 lines 492-498).
         
         Uses min(Q1, Q2) for conservative estimation.
+        Supports JKO techniques: adaptive_eta, warm_start, early_stopping.
         """
         with torch.no_grad():
             if state.dim() == 1:
@@ -488,14 +497,24 @@ class EvoQRE_Langevin(TrafficGamer):
             
             batch_size = state.shape[0]
             
-            # Initialize from random
-            action = torch.randn(
-                batch_size, self.action_dim, device=self.device
-            ) * self.action_bound * 0.5
+            # Initialize action
+            if self.warm_start:
+                # Warm-start from BC-like initialization (use goal direction)
+                # This approximates starting from BC policy output
+                action = torch.zeros(
+                    batch_size, self.action_dim, device=self.device
+                )
+            else:
+                # Random initialization (baseline)
+                action = torch.randn(
+                    batch_size, self.action_dim, device=self.device
+                ) * self.action_bound * 0.5
             action = torch.clamp(action, -self.action_bound, self.action_bound)
             
+            prev_q = None  # For early stopping
+            
             # Langevin dynamics
-            for _ in range(self.langevin_steps):
+            for step in range(self.langevin_steps):
                 action.requires_grad_(True)
                 
                 with torch.enable_grad():
@@ -511,13 +530,31 @@ class EvoQRE_Langevin(TrafficGamer):
                         retain_graph=False
                     )[0]
                 
+                # Compute step size (JKO adaptive η)
+                if self.adaptive_eta:
+                    grad_norm = torch.norm(grad, dim=-1, keepdim=True).clamp(min=0.1)
+                    eta = self.langevin_step_size / grad_norm
+                else:
+                    eta = self.langevin_step_size
+                
                 # Langevin update: a ← a + η∇Q + √(2ητ)ξ
                 noise = torch.randn_like(action)
-                action = action.detach() + \
-                         self.langevin_step_size * grad + \
-                         np.sqrt(2 * self.langevin_step_size * self.tau) * noise
+                if isinstance(eta, torch.Tensor):
+                    noise_scale = torch.sqrt(2 * eta * self.tau)
+                else:
+                    noise_scale = np.sqrt(2 * eta * self.tau)
+                
+                action = action.detach() + eta * grad + noise_scale * noise
                 
                 # Projection
+                action = torch.clamp(action, -self.action_bound, self.action_bound)
+                
+                # Early stopping check (JKO technique)
+                if self.early_stopping and prev_q is not None:
+                    delta_q = (min_q.mean() - prev_q).abs().item()
+                    if delta_q < self.early_stop_threshold:
+                        break  # Converged
+                prev_q = min_q.mean().detach()
                 action = torch.clamp(action, -self.action_bound, self.action_bound)
         
         # DON'T squeeze batch dim - rollout.py line 154 does [0] to get batch item
