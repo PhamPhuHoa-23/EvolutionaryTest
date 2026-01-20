@@ -145,13 +145,31 @@ dataset = ArgoverseV2Dataset(
 )
 print(f"✅ Dataset: {len(dataset)} scenarios")
 
-# Sample scenarios
-import random
-random.seed(CONFIG.seed)
-candidate_indices = random.sample(
-    range(len(dataset)), 
-    min(CONFIG.num_scenarios * 2, len(dataset))  # Sample 2x to account for filtering
-)
+# 6 Representative Scenarios (from Paper/Kaggle)
+REPRESENTATIVE_SCENARIOS = [
+    'd1f6b01e-3b4a-4790-88ed-6d85fb1c0b84', # Merge
+    '00a50e9f-63a1-4678-a4fe-c6109721ecba', # Dual-lane Intersection
+    '236df665-eec6-4c25-8822-950a6150eade', # T-junction
+    'cb0133ff-f7ad-43b7-b260-7068ace15307', # Dense Intersection
+    'cdf70cc8-d13d-470b-bb39-4f1812acc146', # Roundabout
+    '3856ed37-4a05-4131-9b12-c4f4716fec92', # Y-junction
+]
+
+print("🔍 Filtering for 6 representative scenarios...")
+scenario_indices = []
+for idx in range(len(dataset)):
+    fname = dataset.processed_file_names[idx]
+    sid = fname.replace('.pkl', '')
+    if sid in REPRESENTATIVE_SCENARIOS:
+        scenario_indices.append(idx)
+
+# Verify we found all 6
+print(f"✅ Found {len(scenario_indices)}/6 representative scenarios")
+# If not all found, we just proceed with what we found (local dataset might be partial)
+
+# Config overrides
+CONFIG.num_scenarios = len(scenario_indices)
+CONFIG.num_episodes = 30  # As requested
 
 # %% [markdown]
 # ## 4.1 Pre-load Maps (Optimization)
@@ -171,14 +189,9 @@ def get_scenario_id_from_idx(idx):
 MAP_CACHE = {}
 valid_scenario_indices = []
 
-for idx in tqdm(candidate_indices, desc="Caching maps"):
+for idx in tqdm(scenario_indices, desc="Caching maps"):
     try:
         scenario_id = get_scenario_id_from_idx(idx)
-        
-        # Check if already cached
-        if scenario_id in MAP_CACHE:
-            valid_scenario_indices.append(idx)
-            continue
         
         # Try to load map
         map_path = Path(DATA_ROOT) / 'val' / 'raw' / scenario_id / f'log_map_archive_{scenario_id}.json'
@@ -188,13 +201,14 @@ for idx in tqdm(candidate_indices, desc="Caching maps"):
             valid_scenario_indices.append(idx)
         # Skip rglob - too slow, just skip if not found
     except Exception as e:
+        print(f"Warning: Could not load map for {scenario_id}: {e}")
         continue
 
-# Take only requested number of scenarios
-scenario_indices = valid_scenario_indices[:CONFIG.num_scenarios]
+# Final list of scenarios to run (only valid ones)
+scenario_indices = valid_scenario_indices
 
 print(f"✅ Cached {len(MAP_CACHE)} maps")
-print(f"📊 Will evaluate {len(scenario_indices)} valid scenarios")
+print(f"📊 Will evaluate {len(scenario_indices)} scenarios (Target: 6)")
 
 # %% [markdown]
 # ## 5. Load RL Config
@@ -314,7 +328,67 @@ def get_drivable_polygons(static_map):
         return []
 
 # %% [markdown]
-# ## 7. Training Function
+# ## 7. Trajectory Reconstruction
+
+# %%
+def reconstruct_trajectories(initial_pos, initial_vel, initial_heading, actions, dt=0.1):
+    """
+    Reconstruct trajectories using Unicycle Kinematic Model.
+    
+    Args:
+        initial_pos: [N, 2] initial positions
+        initial_vel: [N, 2] initial velocities
+        initial_heading: [N] initial heading (radians)
+        actions: [N, T, 2] actions (acceleration, steering_curvature)
+        dt: timestep
+        
+    Returns:
+        gen_positions: [N, T, 2]
+        gen_velocities: [N, T, 2]
+        gen_headings: [N, T]
+    """
+    N, T, _ = actions.shape
+    curr_pos = torch.tensor(initial_pos[:, :2], dtype=torch.float32)
+    
+    if len(initial_vel.shape) == 2:
+        curr_speed = torch.tensor(np.linalg.norm(initial_vel, axis=-1), dtype=torch.float32)
+    else:
+        curr_speed = torch.tensor(initial_vel, dtype=torch.float32)
+    curr_heading = torch.tensor(initial_heading, dtype=torch.float32)
+    
+    pos_list, head_list = [], []
+    
+    for t in range(T):
+        # Actions: [acceleration (x5), curvature (x0.05)]
+        acc = torch.tensor(actions[:, t, 0], dtype=torch.float32).clip(-1, 1) * 5.0
+        kappa = torch.tensor(actions[:, t, 1], dtype=torch.float32).clip(-1, 1) * 0.05
+        
+        # Unicycle Update
+        distance = curr_speed * dt + 0.5 * acc * (dt**2)
+        next_pos = curr_pos.clone()
+        next_pos[:, 0] += distance * torch.cos(curr_heading)
+        next_pos[:, 1] += distance * torch.sin(curr_heading)
+        next_heading = curr_heading + kappa * distance
+        next_speed = torch.clamp(curr_speed + acc * dt, min=0.0)
+        
+        pos_list.append(next_pos)
+        head_list.append(next_heading)
+        
+        curr_pos, curr_heading, curr_speed = next_pos, next_heading, next_speed
+        
+    gen_positions = torch.stack(pos_list, dim=1).numpy()
+    gen_headings = torch.stack(head_list, dim=1).numpy()
+    
+    # Compute velocity vectors from position differences
+    gen_velocities = np.zeros_like(gen_positions)
+    gen_velocities[:, 1:] = (gen_positions[:, 1:] - gen_positions[:, :-1]) / dt
+    gen_velocities[:, 0] = gen_velocities[:, 1]  # Duplicate first frame
+    
+    return gen_positions, gen_velocities, gen_headings
+
+
+# %% [markdown]
+# ## 8. Training Function
 
 # %%
 def train_and_evaluate(scenario_idx, agent_class, method_name):
@@ -360,9 +434,13 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
     )
 
     # ===========================================
-    # Training Loop
+    # Training Loop with Action Collection
     # ===========================================
     rewards, costs = [], []
+    num_timesteps = int(model.num_future_steps / OFFSET)
+    
+    # Storage for actions from LAST episode (for trajectory reconstruction)
+    last_ep_actions = np.zeros((agent_num, num_timesteps, 2))
     
     for ep in range(CONFIG.num_episodes):
         transition_list = [
@@ -388,64 +466,71 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
         for i in range(agent_num):
             agents[i].update(transition_list, i)
 
-        # Collect episode metrics
+        # Collect episode metrics and actions from last episode
         ep_r, ep_c = 0, 0
         for i in range(agent_num):
             for t in range(len(transition_list[0]["rewards"][i])):
                 for b in range(CONFIG.batch_size):
                     ep_r += float(transition_list[b]["rewards"][i][t])
                     ep_c += float(transition_list[b]["costs"][i][t])
+                    
+                    # Capture actions from the LAST episode, BATCH 0
+                    if ep == CONFIG.num_episodes - 1 and b == 0:
+                        act = transition_list[b]["actions"][i][t]
+                        if isinstance(act, torch.Tensor):
+                            act = act.cpu().numpy()
+                        if act.size >= 2:
+                            last_ep_actions[i, t] = act.flatten()[:2]
                         
         rewards.append(ep_r / (agent_num * CONFIG.batch_size))
         costs.append(ep_c / (agent_num * CONFIG.batch_size))
 
     # ===========================================
-    # Compute Metrics
+    # Reconstruct Generated Trajectories
     # ===========================================
-    # NOTE: Current implementation uses GT trajectories for metrics.
-    # For accurate metrics, should collect GENERATED trajectories from 
-    # PPO_process_batch rollouts. See kaggle_full.py train_scenario()
-    # for the proper implementation with trajectory reconstruction.
-    #
-    # METRIC DEFINITIONS (from paper):
-    # - NLL: KDE-based log-likelihood of generated vs GT velocity distribution
-    # - Collision%: % timesteps with any agent pair < 2m distance
-    # - Off-road%: % positions outside drivable area polygons
-    # - Diversity: Mean pairwise trajectory distance across K rollouts
-    # ===========================================
-    
     hist_steps = model.num_historical_steps
     
-    # Ground truth trajectories
+    # Initial conditions from data
+    init_pos = data["agent"]["position"][agent_indices, hist_steps-1].cpu().numpy()
+    init_vel = data["agent"]["velocity"][agent_indices, hist_steps-1].cpu().numpy()
+    init_head = data["agent"]["heading"][agent_indices, hist_steps-1].cpu().numpy()
+    
+    # Reconstruct using Unicycle model
+    gen_positions, gen_velocities, gen_headings = reconstruct_trajectories(
+        init_pos, init_vel, init_head, last_ep_actions
+    )
+    
+    # Ground truth trajectories (for comparison)
     gt_positions = data["agent"]["position"][agent_indices, hist_steps:].cpu().numpy()
     gt_velocities = data["agent"]["velocity"][agent_indices, hist_steps:].cpu().numpy()
     gt_headings = data["agent"]["heading"][agent_indices, hist_steps:].cpu().numpy()
     
-    # NLL: GT self-comparison (will be ~0, placeholder until generated trajs implemented)
-    # TODO: Replace with generated velocities from rollout
-    gen_velocities = gt_velocities
-    nll = metrics_computer.compute_nll_kde(
-        gen_velocities.flatten(),
-        gt_velocities.flatten()
-    )
+    # ===========================================
+    # Compute Metrics on GENERATED Trajectories
+    # ===========================================
     
-    # Collision rate (on GT positions)
-    collision_rate = metrics_computer.compute_collision_rate(gt_positions)
+    # NLL: Compare generated vs GT velocity distributions
+    gen_vel_norms = np.linalg.norm(gen_velocities, axis=-1).flatten()
+    gt_vel_norms = np.linalg.norm(gt_velocities[:, :gen_velocities.shape[1]], axis=-1).flatten()
+    nll = metrics_computer.compute_nll_kde(gen_vel_norms, gt_vel_norms)
     
-    # Off-road rate (extract polygons from static_map)
+    # Collision rate on GENERATED positions
+    collision_rate = metrics_computer.compute_collision_rate(gen_positions)
+    
+    # Off-road rate on GENERATED positions
     drivable_polygons = get_drivable_polygons(scenario_static_map)
     if drivable_polygons:
-        off_road_rate = metrics_computer.compute_off_road_rate(gt_positions, drivable_polygons)
+        off_road_rate = metrics_computer.compute_off_road_rate(gen_positions, drivable_polygons)
     else:
         off_road_rate = 0.0
     
-    # Diversity: Currently computes mean pairwise distance between agents
-    # TODO: Should be variance across K rollouts for same scenario
-    diversity = metrics_computer.compute_diversity(gt_positions)
+    # Diversity: For single rollout, use trajectory spread
+    # (For proper diversity, need multiple rollouts per scenario)
+    diversity = metrics_computer.compute_diversity(gen_positions)
     
-    # Behavioral metrics
+    # Behavioral metrics on GENERATED trajectories
     behavioral = metrics_computer.compute_behavioral_metrics(
-        gt_positions, gt_velocities, gt_headings
+        gen_positions, gen_velocities, gen_headings
     )
     
     # Stability (for EvoQRE)
