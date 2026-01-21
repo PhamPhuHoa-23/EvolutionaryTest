@@ -427,7 +427,7 @@ class EvoQRE_Langevin(TrafficGamer):
         self.adaptive_eta = config.get('adaptive_eta', False)       # η = η₀/(‖∇Q‖ + ε)
         self.warm_start = config.get('warm_start', False)           # Init from BC output
         self.early_stopping = config.get('early_stopping', False)   # Stop when ΔQ < threshold
-        self.early_stop_threshold = config.get('early_stop_threshold', 1e-4)
+        self.early_stop_threshold = config.get('early_stop_threshold', 1e-3)  # Increased for practical speedup
         
         # ===========================================
         # Q-Networks (Dual for stability)
@@ -483,6 +483,13 @@ class EvoQRE_Langevin(TrafficGamer):
         # Diagnostics
         self.stability_diagnostics: Optional[StabilityDiagnostics] = None
         self.update_count = 0
+        
+        # JKO speedup tracking
+        self.total_langevin_steps_used = 0
+        self.total_langevin_steps_max = 0
+        self.total_sample_time_ms = 0.0
+        self.sample_count = 0
+        self.early_stop_count = 0  # Track how often early stopping triggers
     
     def choose_action(self, state: torch.Tensor) -> torch.Tensor:
         """
@@ -491,6 +498,10 @@ class EvoQRE_Langevin(TrafficGamer):
         Uses min(Q1, Q2) for conservative estimation.
         Supports JKO techniques: adaptive_eta, warm_start, early_stopping.
         """
+        import time
+        start_time = time.perf_counter()
+        steps_used = 0
+        
         with torch.no_grad():
             if state.dim() == 1:
                 state = state.unsqueeze(0)
@@ -515,6 +526,7 @@ class EvoQRE_Langevin(TrafficGamer):
             
             # Langevin dynamics
             for step in range(self.langevin_steps):
+                steps_used = step + 1
                 action.requires_grad_(True)
                 
                 with torch.enable_grad():
@@ -553,9 +565,17 @@ class EvoQRE_Langevin(TrafficGamer):
                 if self.early_stopping and prev_q is not None:
                     delta_q = (min_q.mean() - prev_q).abs().item()
                     if delta_q < self.early_stop_threshold:
-                        break  # Converged
+                        self.early_stop_count += 1
+                        break  # Converged early
                 prev_q = min_q.mean().detach()
                 action = torch.clamp(action, -self.action_bound, self.action_bound)
+        
+        # Track JKO speedup metrics
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        self.total_langevin_steps_used += steps_used
+        self.total_langevin_steps_max += self.langevin_steps
+        self.total_sample_time_ms += elapsed_ms
+        self.sample_count += 1
         
         # DON'T squeeze batch dim - rollout.py line 154 does [0] to get batch item
         # Should return (batch, action_dim) e.g. (1, 2)
@@ -703,3 +723,28 @@ class EvoQRE_Langevin(TrafficGamer):
     def get_alpha(self) -> float:
         """Return α (strong concavity) from Q-network."""
         return self.q1.get_alpha()
+    
+    def get_jko_speedup_info(self) -> Dict:
+        """
+        Return JKO speedup metrics.
+        
+        Returns dict with:
+        - step_efficiency: ratio of steps_used / steps_max (1.0 = no early stop)
+        - speedup: 1 / step_efficiency (e.g., 1.5× if using 67% of steps)
+        - avg_sample_time_ms: average time per action sample
+        """
+        if self.sample_count == 0:
+            return {'step_efficiency': 1.0, 'speedup': 1.0, 'avg_sample_time_ms': 0.0}
+        
+        step_efficiency = self.total_langevin_steps_used / max(self.total_langevin_steps_max, 1)
+        speedup = 1.0 / step_efficiency if step_efficiency > 0 else 1.0
+        avg_time = self.total_sample_time_ms / self.sample_count
+        
+        return {
+            'step_efficiency': step_efficiency,
+            'speedup': speedup,
+            'avg_sample_time_ms': avg_time,
+            'total_samples': self.sample_count,
+            'early_stop_count': self.early_stop_count,
+            'early_stop_rate': self.early_stop_count / max(self.sample_count, 1),
+        }
