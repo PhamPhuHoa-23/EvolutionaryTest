@@ -552,6 +552,33 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
         gen_positions, gen_velocities, gen_headings
     )
     
+    # ===========================================
+    # TrafficGamer-Compatible Metrics
+    # ===========================================
+    
+    # TTC: Time-to-Collision risk ratio (TrafficGamer Table TTC/THW)
+    ttc_risk = metrics_computer.compute_ttc(gen_positions, gen_velocities, threshold=2.0)
+    
+    # THW: Time Headway risk ratio 
+    thw_risk = metrics_computer.compute_thw(gen_positions, gen_velocities, gen_headings, threshold=2.0)
+    
+    # Fidelity metrics (TrafficGamer Figure 7)
+    # Compute acceleration from velocities
+    gen_accels = np.diff(gen_velocities, axis=1) / 0.1  # dt=0.1s
+    gt_accels = np.diff(gt_velocities[:, :gen_velocities.shape[1]], axis=1) / 0.1
+    
+    # Hellinger distance for velocity distribution
+    hellinger_vel = metrics_computer.compute_hellinger_distance(gen_vel_norms, gt_vel_norms)
+    
+    # Hellinger distance for acceleration distribution
+    gen_accel_norms = np.linalg.norm(gen_accels, axis=-1).flatten()
+    gt_accel_norms = np.linalg.norm(gt_accels, axis=-1).flatten()
+    hellinger_accel = metrics_computer.compute_hellinger_distance(gen_accel_norms, gt_accel_norms)
+    
+    # KL and Wasserstein for velocity
+    kl_vel = metrics_computer.compute_kl_divergence(gen_vel_norms, gt_vel_norms)
+    wasserstein_vel = metrics_computer.compute_wasserstein(gen_vel_norms, gt_vel_norms)
+    
     # Stability (for EvoQRE)
     alpha, kappa, stability_ok = 0.0, 0.0, False
     if hasattr(agents[0], 'get_stability_info'):
@@ -580,6 +607,14 @@ def train_and_evaluate(scenario_idx, agent_class, method_name):
         accel_std=behavioral['accel_std'],
         following_dist_mean=behavioral['following_dist_mean'],
         following_dist_std=behavioral['following_dist_std'],
+        # TrafficGamer-compatible metrics
+        ttc_risk_ratio=ttc_risk,
+        thw_risk_ratio=thw_risk,
+        hellinger_velocity=hellinger_vel,
+        hellinger_acceleration=hellinger_accel,
+        kl_velocity=kl_vel,
+        wasserstein_velocity=wasserstein_vel,
+        # Stability
         alpha=alpha,
         kappa=kappa,
         stability_satisfied=stability_ok,
@@ -652,6 +687,10 @@ for method_name, results_list in all_results.items():
         'collision_rate': r.collision_rate,
         'off_road_rate': r.off_road_rate,
         'diversity': r.diversity,
+        'ttc_risk': r.ttc_risk_ratio,
+        'thw_risk': r.thw_risk_ratio,
+        'hellinger_vel': r.hellinger_velocity,
+        'hellinger_accel': r.hellinger_acceleration,
     } for r in results_list])
     
     table_data.append({
@@ -664,6 +703,38 @@ for method_name, results_list in all_results.items():
 
 result_df = pd.DataFrame(table_data)
 print(result_df.to_markdown(index=False))
+
+# TrafficGamer-compatible risk metrics table
+print("\n" + "="*70)
+print("📊 TABLE: TRAFFICGAMER-COMPATIBLE RISK METRICS")
+print("="*70)
+
+ttc_table = []
+for method_name, results_list in all_results.items():
+    if not results_list:
+        continue
+    
+    df = pd.DataFrame([{
+        'ttc_risk': r.ttc_risk_ratio,
+        'thw_risk': r.thw_risk_ratio,
+        'hellinger_vel': r.hellinger_velocity,
+        'hellinger_accel': r.hellinger_acceleration,
+        'kl_vel': r.kl_velocity,
+        'wasserstein_vel': r.wasserstein_velocity,
+    } for r in results_list])
+    
+    ttc_table.append({
+        'Method': method_name,
+        'TTC Risk%': f"{df['ttc_risk'].mean()*100:.2f}±{df['ttc_risk'].std()*100:.2f}",
+        'THW Risk%': f"{df['thw_risk'].mean()*100:.2f}±{df['thw_risk'].std()*100:.2f}",
+        'D_H (vel)↓': f"{df['hellinger_vel'].mean():.4f}±{df['hellinger_vel'].std():.4f}",
+        'D_H (accel)↓': f"{df['hellinger_accel'].mean():.4f}±{df['hellinger_accel'].std():.4f}",
+        'D_KL↓': f"{df['kl_vel'].mean():.4f}±{df['kl_vel'].std():.4f}",
+        'D_W↓': f"{df['wasserstein_vel'].mean():.4f}±{df['wasserstein_vel'].std():.4f}",
+    })
+
+ttc_df = pd.DataFrame(ttc_table)
+print(ttc_df.to_markdown(index=False))
 
 # %% [markdown]
 # ## 10. LaTeX Output
