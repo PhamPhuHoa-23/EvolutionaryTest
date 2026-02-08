@@ -237,14 +237,16 @@ for epsilon in CONFIG['epsilon_values']:
 print("\n" + "="*70)
 print("📊 TABLE: Q-HEAD ARCHITECTURE COMPARISON")
 print("="*70)
+print("\nNote: NLL/Collision require full training runs.")
+print("      Concavity and Stability are computed via Monte Carlo analysis.")
 
 table_data = []
 for r in results:
     table_data.append({
         'Architecture': r['architecture'],
-        'NLL↓': 'TBD',  # Need full training
-        'Coll.%↓': 'TBD',
-        'Stability': f"{r['stability_rate']*100:.0f}%",
+        'Concavity↑': f"{r['concavity_rate']*100:.0f}%",
+        'Stability↑': f"{r['stability_rate']*100:.0f}%",
+        'ε': r['epsilon'],
     })
 
 df = pd.DataFrame(table_data)
