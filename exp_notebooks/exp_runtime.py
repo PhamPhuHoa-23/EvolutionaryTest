@@ -153,6 +153,95 @@ results.append({
 })
 print(f"  Inference: {evo_time:.1f}±{evo_std:.1f} ms/step")
 
+# %% [markdown]
+# ## Measure Training Time (Estimate)
+#
+# Run a few episodes and extrapolate to full training
+
+# %%
+print("\n" + "="*50)
+print("Measuring training time (5 episode sample)...")
+print("="*50)
+
+RUN_TRAINING_TIMING = True  # Set to False to skip
+
+if RUN_TRAINING_TIMING:
+    try:
+        from datasets.argoverse_v2_dataset import ArgoverseV2Dataset
+        from utils.rollout import PPO_process_batch_from_qcnet
+        from modules.auto_qcnet import AutoQCNet
+        
+        # Load backbone if available
+        ckpt_path = 'checkpoints/qcnet_av2.ckpt'
+        if Path(ckpt_path).exists():
+            model = AutoQCNet.load_from_checkpoint(ckpt_path, map_location=DEVICE)
+            model.eval()
+            model = model.to(DEVICE)
+            
+            # Load one scenario
+            dataset = ArgoverseV2Dataset(root='data/argoverse2', split='val')
+            data = dataset[0].to(DEVICE)
+            
+            agent_indices = torch.where(data['agent']['category'] == 2)[0][:CONFIG['num_agents']].tolist()
+            agent_num = len(agent_indices)
+            
+            if agent_num > 0:
+                # Measure TrafficGamer training time
+                print("\nTrafficGamer training (5 episodes)...")
+                rl_config = {'batch_size': 32, 'hidden_dim': CONFIG['hidden_dim'], 
+                            'epochs': 10, 'agent_number': agent_num,
+                            'actor_learning_rate': 1e-4, 'critic_learning_rate': 1e-4,
+                            'density_learning_rate': 3e-4, 'constrainted_critic_learning_rate': 1e-4,
+                            'gamma': 0.99, 'lamda': 0.95, 'eps': 0.2, 'entropy_coef': 0.005,
+                            'penalty_initial_value': 1.0, 'cost_quantile': 48,
+                            'tau_update': 0.01, 'LR_QN': 3e-4, 'N_quantile': 64}
+                
+                tg_agents = [TrafficGamer(model.hidden_dim, agent_num, rl_config, DEVICE) for _ in range(agent_num)]
+                
+                start_time = time.time()
+                for ep in range(5):
+                    transition_list, _, _ = PPO_process_batch_from_qcnet(
+                        model, data, tg_agents, agent_indices, device=DEVICE
+                    )
+                    for a_idx, agent in enumerate(tg_agents):
+                        agent.update(transition_list, a_idx)
+                tg_train_5ep = time.time() - start_time
+                
+                # Extrapolate to full training (50 eps * 200 scenarios)
+                tg_train_hrs = (tg_train_5ep / 5) * 50 * 200 / 3600
+                results[0]['train_hrs'] = f"{tg_train_hrs:.1f}"
+                print(f"  5 ep: {tg_train_5ep:.1f}s → Est. {tg_train_hrs:.1f} hrs total")
+                
+                # Measure EvoQRE training time
+                print("\nEvoQRE training (5 episodes)...")
+                evo_config = {**rl_config, 'langevin_steps': 20, 'langevin_step_size': 0.1, 
+                             'tau': 1.0, 'epsilon': 0.1}
+                evo_agents = [EvoQRE_Langevin(model.hidden_dim, agent_num, evo_config, DEVICE) for _ in range(agent_num)]
+                
+                start_time = time.time()
+                for ep in range(5):
+                    transition_list, _, _ = PPO_process_batch_from_qcnet(
+                        model, data, evo_agents, agent_indices, device=DEVICE
+                    )
+                    for a_idx, agent in enumerate(evo_agents):
+                        agent.update(transition_list, a_idx)
+                evo_train_5ep = time.time() - start_time
+                
+                evo_train_hrs = (evo_train_5ep / 5) * 50 * 200 / 3600
+                results[1]['train_hrs'] = f"{evo_train_hrs:.1f}"
+                print(f"  5 ep: {evo_train_5ep:.1f}s → Est. {evo_train_hrs:.1f} hrs total")
+                
+                # Speedup
+                if tg_train_hrs > 0:
+                    print(f"\n📊 Training speedup: EvoQRE is {tg_train_hrs/evo_train_hrs:.2f}× faster")
+        else:
+            print(f"⚠️ Backbone not found: {ckpt_path}")
+            
+    except Exception as e:
+        import traceback
+        print(f"⚠️ Training timing error: {e}")
+        traceback.print_exc()
+
 # Baselines (estimates from paper)
 results.extend([
     {'method': 'BC', 'inference_ms': 5, 'train_hrs': '2'},
