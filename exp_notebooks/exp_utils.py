@@ -52,6 +52,16 @@ class ScenarioResult:
     following_dist_std: float = 0.0
     lane_changes_per_km: float = 0.0
     
+    # TrafficGamer-compatible risk metrics
+    ttc_risk_ratio: float = 0.0  # Time-to-Collision < 2s
+    thw_risk_ratio: float = 0.0  # Time Headway < 2s
+    
+    # TrafficGamer-compatible fidelity metrics
+    hellinger_velocity: float = 0.0
+    hellinger_acceleration: float = 0.0
+    kl_velocity: float = 0.0
+    wasserstein_velocity: float = 0.0
+    
     # Stability metrics (Table: Stability)
     alpha: float = 0.0
     kappa: float = 0.0
@@ -390,6 +400,171 @@ class MetricsComputer:
             return wasserstein_distance(samples.flatten(), reference.flatten())
         except:
             return 0.0
+    
+    # ==========================================
+    # TrafficGamer-Compatible Risk Metrics
+    # ==========================================
+    
+    def compute_ttc(
+        self,
+        positions: np.ndarray,
+        velocities: np.ndarray,
+        threshold: float = 2.0
+    ) -> float:
+        """
+        Compute Time-to-Collision (TTC) risk ratio.
+        
+        TTC = distance / closing_speed (when vehicles are approaching).
+        
+        Args:
+            positions: (num_agents, num_steps, 2 or 3)
+            velocities: (num_agents, num_steps, 2 or 3)
+            threshold: TTC threshold in seconds (TrafficGamer uses 2.0s)
+            
+        Returns:
+            Fraction of timestep-pairs where TTC < threshold [0, 1]
+        """
+        if positions.shape[0] < 2:
+            return 0.0
+        
+        num_agents, num_steps = positions.shape[:2]
+        risk_count = 0
+        total_pairs = 0
+        
+        for t in range(num_steps):
+            for i in range(num_agents):
+                for j in range(i + 1, num_agents):
+                    pos_i = positions[i, t, :2]
+                    pos_j = positions[j, t, :2]
+                    vel_i = velocities[i, t, :2]
+                    vel_j = velocities[j, t, :2]
+                    
+                    # Relative position and velocity
+                    rel_pos = pos_j - pos_i
+                    rel_vel = vel_j - vel_i
+                    distance = np.linalg.norm(rel_pos)
+                    
+                    if distance < 0.01:  # Already colliding
+                        risk_count += 1
+                        total_pairs += 1
+                        continue
+                    
+                    # Closing speed (projection of rel_vel onto rel_pos direction)
+                    closing_speed = -np.dot(rel_vel, rel_pos) / distance
+                    total_pairs += 1
+                    
+                    # If approaching and TTC < threshold
+                    if closing_speed > 0.1:  # Only count approaching vehicles
+                        ttc = distance / closing_speed
+                        if ttc < threshold:
+                            risk_count += 1
+        
+        return risk_count / max(total_pairs, 1)
+    
+    def compute_thw(
+        self,
+        positions: np.ndarray,
+        velocities: np.ndarray,
+        headings: np.ndarray,
+        threshold: float = 2.0
+    ) -> float:
+        """
+        Compute Time Headway (THW) risk ratio.
+        
+        THW = distance / follower_speed (for following vehicle pairs).
+        
+        Args:
+            positions: (num_agents, num_steps, 2 or 3)
+            velocities: (num_agents, num_steps, 2 or 3)
+            headings: (num_agents, num_steps)
+            threshold: THW threshold in seconds (TrafficGamer uses 2.0s)
+            
+        Returns:
+            Fraction of following situations where THW < threshold [0, 1]
+        """
+        if positions.shape[0] < 2:
+            return 0.0
+        
+        num_agents, num_steps = positions.shape[:2]
+        risk_count = 0
+        total_checks = 0
+        
+        for t in range(num_steps):
+            for i in range(num_agents):  # Lead vehicle
+                for j in range(num_agents):  # Follower candidate
+                    if i == j:
+                        continue
+                    
+                    pos_i = positions[i, t, :2]
+                    pos_j = positions[j, t, :2]
+                    vel_j = velocities[j, t, :2]
+                    heading_i = headings[i, t]
+                    
+                    # Direction vector from j to i
+                    dir_to_i = pos_i - pos_j
+                    dir_norm = np.linalg.norm(dir_to_i)
+                    if dir_norm < 0.5:  # Too close to determine
+                        continue
+                    
+                    # Check if j is roughly behind i (following)
+                    heading_vec = np.array([np.cos(heading_i), np.sin(heading_i)])
+                    alignment = np.dot(dir_to_i / dir_norm, heading_vec)
+                    
+                    if alignment > 0.7:  # j is behind i and facing similar direction
+                        speed_j = np.linalg.norm(vel_j)
+                        if speed_j > 0.5:  # Follower is moving
+                            thw = dir_norm / speed_j
+                            total_checks += 1
+                            if thw < threshold:
+                                risk_count += 1
+        
+        return risk_count / max(total_checks, 1)
+    
+    def compute_hellinger_distance(
+        self,
+        samples: np.ndarray,
+        reference: np.ndarray,
+        bins: int = 50
+    ) -> float:
+        """
+        Compute Hellinger distance between distributions.
+        
+        H(P, Q) = sqrt(0.5 * sum((sqrt(P) - sqrt(Q))^2))
+        
+        Args:
+            samples: Generated samples
+            reference: Ground truth samples
+            bins: Number of histogram bins
+            
+        Returns:
+            Hellinger distance [0, 1] where 0 = identical distributions
+        """
+        try:
+            samples_flat = samples.flatten()
+            ref_flat = reference.flatten()
+            
+            # Determine range
+            range_min = min(samples_flat.min(), ref_flat.min())
+            range_max = max(samples_flat.max(), ref_flat.max())
+            
+            # Create histograms
+            hist_samples, _ = np.histogram(
+                samples_flat, bins=bins, range=(range_min, range_max), density=True
+            )
+            hist_ref, _ = np.histogram(
+                ref_flat, bins=bins, range=(range_min, range_max), density=True
+            )
+            
+            # Normalize to probabilities
+            hist_samples = hist_samples / (hist_samples.sum() + 1e-10)
+            hist_ref = hist_ref / (hist_ref.sum() + 1e-10)
+            
+            # Hellinger distance
+            hellinger = np.sqrt(0.5 * np.sum((np.sqrt(hist_samples) - np.sqrt(hist_ref)) ** 2))
+            
+            return hellinger if np.isfinite(hellinger) else 1.0
+        except:
+            return 1.0
 
 
 # ==============================================================================
